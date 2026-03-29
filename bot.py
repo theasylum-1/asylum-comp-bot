@@ -74,7 +74,10 @@ async def identify_card(image_url: str) -> dict:
 
 
 # ── Step 2 — Build a clean eBay search query from the card info ───────────────
-def build_ebay_query(card: dict) -> str:
+# 2. Build query
+        print(f"Card identified: {card}")
+        query = build_ebay_query(card)
+        print(f"eBay query: {repr(query)}")
     parts = []
     if card.get("year"):        parts.append(card["year"])
     if card.get("player"):      parts.append(card["player"])
