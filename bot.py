@@ -5,6 +5,7 @@ import os
 import json
 import re
 from datetime import datetime
+from urllib.parse import quote_plus
 
 # Config
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
@@ -16,7 +17,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Prevent double responses
 processed_messages = set()
 
 
@@ -87,30 +87,53 @@ def build_ebay_query(card: dict) -> str:
 
 
 async def get_ebay_comps(query: str) -> list:
+    """
+    Give Claude the exact eBay sold listings URL and ask it to extract prices.
+    """
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
 
-    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
+    # Build the exact eBay sold listings URL
+    encoded = quote_plus(query)
+    ebay_url = (
+        f"https://www.ebay.com/sch/i.html"
+        f"?_nkw={encoded}"
+        f"&LH_Complete=1"
+        f"&LH_Sold=1"
+        f"&_sop=13"
+        f"&_ipg=10"
+    )
 
-    # Single turn — search and return structured data
-    prompt = f"""Search eBay sold/completed listings for this trading card: "{query}"
+    print(f"eBay URL: {ebay_url}")
 
-Search for recently SOLD listings on eBay for this card. After searching, you MUST respond with ONLY this exact format — a raw JSON array, nothing else before or after it:
+    tools = [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 2,
+        }
+    ]
 
+    prompt = f"""I need you to find recent sold prices for this trading card: "{query}"
+
+Please search for sold eBay listings using this exact URL: {ebay_url}
+
+Also try searching: site:ebay.com "{query}" sold
+
+Extract the sold listing data and respond with ONLY a JSON array in this exact format:
 [
-  {{"title": "card title here", "price": 25.00, "date": "Mar 2025", "url": "https://www.ebay.com/itm/..."}},
-  {{"title": "card title here", "price": 18.50, "date": "Feb 2025", "url": "https://www.ebay.com/itm/..."}}
+  {{"title": "listing title", "price": 25.00, "date": "Mar 2025", "url": "https://www.ebay.com/itm/..."}}
 ]
 
-Rules:
-- price must be a number (no $ sign)
-- Include up to 5 results
-- Only include actual SOLD listings with real prices
-- If truly no sold listings exist, respond with exactly: []
-- DO NOT include any text before or after the JSON array"""
+Important:
+- price must be a number (no $ sign)  
+- Up to 5 results maximum
+- Only SOLD/COMPLETED listings with actual sale prices
+- Respond with ONLY the JSON array, nothing else
+- If no sold listings found, respond with exactly: []"""
 
     messages = [{"role": "user", "content": prompt}]
 
@@ -138,21 +161,19 @@ Rules:
         print(f"API error: {data}")
         return []
 
-    # Collect all text blocks
     full_text = " ".join(
         b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
     ).strip()
 
-    print(f"Full text response: {full_text[:500]}")
+    print(f"Full text: {full_text[:800]}")
 
     if not full_text:
         return []
 
-    # Try to find and parse a JSON array anywhere in the response
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", full_text, flags=re.MULTILINE).strip()
     match = re.search(r'\[.*?\]', raw, re.DOTALL)
     if not match:
-        print("No JSON array found in response")
+        print("No JSON array found")
         return []
 
     try:
@@ -242,7 +263,6 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Prevent double responses
     if message.id in processed_messages:
         return
     processed_messages.add(message.id)
