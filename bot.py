@@ -16,7 +16,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Track processed messages to prevent double responses
+# Prevent double responses
 processed_messages = set()
 
 
@@ -34,14 +34,14 @@ async def identify_card(image_urls: list) -> dict:
                 "(there may be a front and back) and return ONLY a JSON object with no markdown or explanation.\n\n"
                 "Rules:\n"
                 "- 'player': Full name of player or character on the card\n"
-                "- 'year': The year of the card. Check the back carefully — it is often printed there.\n"
+                "- 'year': The year of the card. Check the back carefully.\n"
                 "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
-                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name or year.\n"
-                "- 'variation': Any parallel or special version (Refractor, Holo, Auto, Autograph, Rookie, Gold, etc). Leave empty string if base.\n"
-                "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the denominator (e.g. '75'). Leave empty string if not numbered.\n"
-                "- 'card_number': The card's catalog number (e.g. 'AC-OS'). NOT the serial number.\n"
+                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). No brand/year.\n"
+                "- 'variation': Any parallel (Refractor, Holo, Auto, Autograph, Rookie, Gold, etc). Empty string if base.\n"
+                "- 'serial': Print run denominator only (e.g. '75' from '54/75'). Empty string if not numbered.\n"
+                "- 'card_number': Catalog number (e.g. 'AC-OS'). NOT serial number.\n"
                 "- 'sport': Baseball, Football, Basketball, Pokemon, One Piece, etc\n\n"
-                "All values must be single-line strings with no newlines. Return empty string for any field you cannot determine."
+                "All values single-line strings, no newlines. Empty string if unknown."
             ),
         }
     ]
@@ -83,34 +83,82 @@ def build_ebay_query(card: dict) -> str:
     if card.get("variation"): parts.append(card["variation"])
     if card.get("serial"):    parts.append(f"/{card['serial']}")
     query = " ".join(parts)
-    query = re.sub(r"[\r\n\t]+", " ", query).strip()
-    return query
+    return re.sub(r"[\r\n\t]+", " ", query).strip()
 
 
-def extract_text_from_blocks(content_blocks: list) -> str:
-    """Extract and combine all text blocks from API response."""
-    return " ".join(
-        block.get("text", "")
-        for block in content_blocks
-        if block.get("type") == "text"
-    ).strip()
+async def get_ebay_comps(query: str) -> list:
+    headers = {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
 
+    tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}]
 
-def parse_comps_from_text(text: str) -> list:
-    """Try to parse a JSON array of comps from text."""
-    if not text.strip():
+    # Single turn — search and return structured data
+    prompt = f"""Search eBay sold/completed listings for this trading card: "{query}"
+
+Search for recently SOLD listings on eBay for this card. After searching, you MUST respond with ONLY this exact format — a raw JSON array, nothing else before or after it:
+
+[
+  {{"title": "card title here", "price": 25.00, "date": "Mar 2025", "url": "https://www.ebay.com/itm/..."}},
+  {{"title": "card title here", "price": 18.50, "date": "Feb 2025", "url": "https://www.ebay.com/itm/..."}}
+]
+
+Rules:
+- price must be a number (no $ sign)
+- Include up to 5 results
+- Only include actual SOLD listings with real prices
+- If truly no sold listings exist, respond with exactly: []
+- DO NOT include any text before or after the JSON array"""
+
+    messages = [{"role": "user", "content": prompt}]
+
+    payload = {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 2000,
+        "tools": tools,
+        "messages": messages,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+        ) as resp:
+            status = resp.status
+            data = await resp.json()
+
+    print(f"API status: {status}, stop_reason: {data.get('stop_reason')}")
+    block_types = [b.get("type") for b in data.get("content", [])]
+    print(f"Block types: {block_types}")
+
+    if status != 200:
+        print(f"API error: {data}")
         return []
 
-    raw = text.strip()
-    raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
+    # Collect all text blocks
+    full_text = " ".join(
+        b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+    ).strip()
 
-    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    print(f"Full text response: {full_text[:500]}")
+
+    if not full_text:
+        return []
+
+    # Try to find and parse a JSON array anywhere in the response
+    raw = re.sub(r"^```json\s*|^```\s*|```$", "", full_text, flags=re.MULTILINE).strip()
+    match = re.search(r'\[.*?\]', raw, re.DOTALL)
     if not match:
+        print("No JSON array found in response")
         return []
 
     try:
         comps = json.loads(match.group())
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error: {e}")
         return []
 
     results = []
@@ -129,113 +177,6 @@ def parse_comps_from_text(text: str) -> list:
             continue
 
     return results
-
-
-async def get_ebay_comps(query: str) -> list:
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    tools = [
-        {
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": 3,
-        }
-    ]
-
-    # Turn 1 — search and summarize in one shot
-    messages = [
-        {
-            "role": "user",
-            "content": (
-                f'Search eBay completed/sold listings for this trading card: "{query}"\n\n'
-                f'After searching, return ONLY a JSON array with no markdown or extra text. '
-                f'Include up to 5 recently sold eBay listings. '
-                f'Each object must have exactly these keys: '
-                f'"title" (string, max 60 chars), '
-                f'"price" (number, no $ sign), '
-                f'"date" (string), '
-                f'"url" (string, full eBay listing URL). '
-                f'If no sold listings found, return []'
-            )
-        }
-    ]
-
-    payload1 = {
-        "model": "claude-sonnet-4-5-20250929",
-        "max_tokens": 2000,
-        "tools": tools,
-        "messages": messages,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=payload1,
-        ) as resp:
-            status1 = resp.status
-            data1 = await resp.json()
-
-    print(f"Turn 1 status: {status1}, stop_reason: {data1.get('stop_reason')}")
-    block_types = [b.get('type') for b in data1.get('content', [])]
-    print(f"Turn 1 block types: {block_types}")
-
-    if status1 != 200:
-        print(f"Turn 1 error: {data1}")
-        return []
-
-    # Try to parse comps from Turn 1 text blocks first
-    turn1_text = extract_text_from_blocks(data1.get("content", []))
-    print(f"Turn 1 text: {turn1_text[:300]}")
-
-    comps = parse_comps_from_text(turn1_text)
-    if comps:
-        print(f"Got comps from Turn 1: {len(comps)}")
-        return comps
-
-    # Turn 1 didn't return JSON — do Turn 2 asking for JSON format
-    print("Turn 1 had no parseable JSON, doing Turn 2...")
-    messages.append({"role": "assistant", "content": data1["content"]})
-    messages.append({
-        "role": "user",
-        "content": (
-            "Now return the sold listing data you found as ONLY a JSON array. "
-            "No markdown, no explanation, just the raw JSON array. "
-            "Each object: \"title\", \"price\" (number), \"date\", \"url\". "
-            "If nothing found, return []"
-        )
-    })
-
-    payload2 = {
-        "model": "claude-sonnet-4-5-20250929",
-        "max_tokens": 2000,
-        "tools": tools,
-        "messages": messages,
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=payload2,
-        ) as resp:
-            status2 = resp.status
-            data2 = await resp.json()
-
-    print(f"Turn 2 status: {status2}, stop_reason: {data2.get('stop_reason')}")
-
-    if status2 != 200:
-        print(f"Turn 2 error: {data2}")
-        return []
-
-    turn2_text = extract_text_from_blocks(data2.get("content", []))
-    print(f"Turn 2 text: {turn2_text[:300]}")
-
-    return parse_comps_from_text(turn2_text)
 
 
 def format_response(card: dict, query: str, comps: list, manual: bool = False) -> discord.Embed:
@@ -282,7 +223,7 @@ def format_response(card: dict, query: str, comps: list, manual: bool = False) -
             name="⚠️ No Sales Found",
             value=(
                 "Try posting clearer front **and back** photos, "
-                "or add a caption like:\n`2022 Topps Brooklyn Collection Ozzie Smith Auto /75`"
+                "or add a caption like:\n`2021 Tarik Skubal Topps Chrome Rookie`"
             ),
             inline=False,
         )
@@ -301,12 +242,10 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Prevent double-processing the same message
+    # Prevent double responses
     if message.id in processed_messages:
         return
     processed_messages.add(message.id)
-
-    # Keep the set from growing forever
     if len(processed_messages) > 1000:
         oldest = list(processed_messages)[:500]
         for msg_id in oldest:
@@ -341,7 +280,7 @@ async def on_message(message: discord.Message):
             query = re.sub(r"[\r\n\t]+", " ", caption).strip()
             card = {}
             manual = True
-            print(f"Manual query from caption: {repr(query)}")
+            print(f"Manual query: {repr(query)}")
         else:
             card = await identify_card(image_urls)
             print(f"Card identified: {card}")
@@ -351,9 +290,8 @@ async def on_message(message: discord.Message):
         if not query.strip():
             await thinking.edit(
                 content=(
-                    "❌ Couldn't identify the card from that image.\n"
-                    "Try posting the **front and back** together, or add a caption like:\n"
-                    "`2022 Topps Brooklyn Collection Ozzie Smith Auto /75`"
+                    "❌ Couldn't identify the card. Try posting front **and back** together, "
+                    "or add a caption like:\n`2021 Tarik Skubal Topps Chrome Rookie`"
                 )
             )
             return
@@ -369,7 +307,7 @@ async def on_message(message: discord.Message):
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
-        await thinking.edit(content="❌ Something went wrong pulling comps. Try again or check the logs.")
+        await thinking.edit(content="❌ Something went wrong. Try again or check the logs.")
 
     await bot.process_commands(message)
 
