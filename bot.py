@@ -91,30 +91,29 @@ async def get_ebay_comps(query: str) -> list:
         "content-type": "application/json",
     }
 
-    prompt = (
-        f'Search eBay completed/sold listings for this trading card: "{query}"\n\n'
-        f'Find recent sold prices on eBay for this card. '
-        f'Return ONLY a JSON array (no markdown, no extra text) with up to 5 sold listings. '
-        f'Each object must have: '
-        f'"title" (string, max 60 chars), '
-        f'"price" (number, no $ sign), '
-        f'"date" (string), '
-        f'"url" (string, full eBay URL). '
-        f'If no sold listings found, return []'
-    )
+    tools = [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 3,
+        }
+    ]
 
-    messages = [{"role": "user", "content": prompt}]
+    # Turn 1 — ask Claude to search eBay sold listings
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f'Search eBay completed/sold listings for this trading card: "{query}"\n\n'
+                f'Use web search to find recent sold prices on eBay for this specific card.'
+            )
+        }
+    ]
 
-    payload = {
+    payload1 = {
         "model": "claude-sonnet-4-5-20250929",
-        "max_tokens": 1500,
-        "tools": [
-            {
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 3,
-            }
-        ],
+        "max_tokens": 2000,
+        "tools": tools,
         "messages": messages,
     }
 
@@ -122,58 +121,61 @@ async def get_ebay_comps(query: str) -> list:
         async with session.post(
             "https://api.anthropic.com/v1/messages",
             headers=headers,
-            json=payload,
+            json=payload1,
         ) as resp:
-            status = resp.status
-            data = await resp.json()
+            status1 = resp.status
+            data1 = await resp.json()
 
-    print(f"Anthropic API status: {status}")
-    print(f"Full API response: {json.dumps(data)[:1000]}")
+    print(f"Turn 1 status: {status1}, stop_reason: {data1.get('stop_reason')}")
+    print(f"Turn 1 block types: {[b.get('type') for b in data1.get('content', [])]}")
 
-    if status != 200:
-        print(f"API Error: {data}")
+    if status1 != 200:
+        print(f"Turn 1 error: {data1}")
         return []
 
-    stop_reason = data.get("stop_reason")
-    content_blocks = data.get("content", [])
-    print(f"Stop reason: {stop_reason}")
-    print(f"Content block types: {[b.get('type') for b in content_blocks]}")
+    # Add Claude's response to message history
+    messages.append({"role": "assistant", "content": data1["content"]})
 
-    # If web search was used, continue conversation for final answer
-    if stop_reason in ("tool_use", "pause_turn") or any(
-        b.get("type") in ("server_tool_use", "web_search_tool_result")
-        for b in content_blocks
-    ):
-        messages.append({"role": "assistant", "content": content_blocks})
+    # Turn 2 — ask Claude to format results as JSON
+    messages.append({
+        "role": "user",
+        "content": (
+            "Based on the search results above, return ONLY a JSON array with no markdown or extra text. "
+            "Include up to 5 recently sold eBay listings for this card. "
+            "Each object must have exactly these keys: "
+            "\"title\" (string, max 60 chars), "
+            "\"price\" (number, no $ sign), "
+            "\"date\" (string), "
+            "\"url\" (string, full eBay listing URL). "
+            "If no sold listings were found, return an empty array: []"
+        )
+    })
 
-        payload2 = {
-            "model": "claude-sonnet-4-5-20250929",
-            "max_tokens": 1500,
-            "tools": [
-                {
-                    "type": "web_search_20250305",
-                    "name": "web_search",
-                    "max_uses": 3,
-                }
-            ],
-            "messages": messages,
-        }
+    payload2 = {
+        "model": "claude-sonnet-4-5-20250929",
+        "max_tokens": 2000,
+        "tools": tools,
+        "messages": messages,
+    }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json=payload2,
-            ) as resp2:
-                status2 = resp2.status
-                data = await resp2.json()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload2,
+        ) as resp:
+            status2 = resp.status
+            data2 = await resp.json()
 
-        print(f"Second API status: {status2}")
-        print(f"Second response: {json.dumps(data)[:1000]}")
+    print(f"Turn 2 status: {status2}, stop_reason: {data2.get('stop_reason')}")
 
-    # Extract text
+    if status2 != 200:
+        print(f"Turn 2 error: {data2}")
+        return []
+
+    # Extract text from final response
     full_text = ""
-    for block in data.get("content", []):
+    for block in data2.get("content", []):
         if block.get("type") == "text":
             full_text += block.get("text", "")
 
@@ -182,6 +184,7 @@ async def get_ebay_comps(query: str) -> list:
     if not full_text.strip():
         return []
 
+    # Parse JSON array
     raw = full_text.strip()
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
 
