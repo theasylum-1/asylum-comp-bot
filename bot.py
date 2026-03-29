@@ -1,15 +1,16 @@
 import discord
 from discord.ext import commands
 import aiohttp
+from bs4 import BeautifulSoup
 import os
 import json
 import re
 from datetime import datetime
+from urllib.parse import quote_plus
 
 # Config
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-EBAY_APP_ID = os.environ["EBAY_APP_ID"]
 PRICE_CHECK_CHANNEL = "price-check"
 
 intents = discord.Intents.default()
@@ -78,45 +79,73 @@ def build_ebay_query(card: dict) -> str:
 
 
 async def get_ebay_comps(query: str) -> list:
-    params = {
-        "OPERATION-NAME": "findCompletedItems",
-        "SERVICE-VERSION": "1.0.0",
-        "SECURITY-APPNAME": EBAY_APP_ID,
-        "RESPONSE-DATA-FORMAT": "JSON",
-        "REST-PAYLOAD": "",
-        "keywords": query,
-        "itemFilter(0).name": "SoldItemsOnly",
-        "itemFilter(0).value": "true",
-        "sortOrder": "EndTimeSoonest",
-        "paginationInput.entriesPerPage": "5",
+    """
+    Scrapes eBay completed/sold listings directly — no API key needed.
+    Returns list of dicts: {title, price, date, url}
+    """
+    encoded = quote_plus(query)
+    # LH_Complete=1 = completed listings, LH_Sold=1 = sold only, _sop=13 = newest first
+    url = (
+        f"https://www.ebay.com/sch/i.html"
+        f"?_nkw={encoded}"
+        f"&LH_Complete=1"
+        f"&LH_Sold=1"
+        f"&_sop=13"
+        f"&_ipg=10"
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
-    url = "https://svcs.ebay.com/services/search/FindingService/v1"
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            data = await resp.json(content_type=None)
+        async with session.get(url, headers=headers) as resp:
+            html = await resp.text()
 
-    try:
-        items = (
-            data["findCompletedItemsResponse"][0]
-            ["searchResult"][0]
-            ["item"]
-        )
-    except (KeyError, IndexError):
-        return []
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select(".s-item__info")
 
     results = []
-    for item in items[:5]:
+    for item in items:
         try:
-            price = float(item["sellingStatus"][0]["currentPrice"][0]["__value__"])
-            end_time = item["listingInfo"][0]["endTime"][0][:10]
+            title_el = item.select_one(".s-item__title")
+            price_el = item.select_one(".s-item__price")
+            date_el  = item.select_one(".s-item__ended-date, .s-item__listingDate")
+            link_el  = item.select_one("a.s-item__link")
+
+            if not title_el or not price_el or not link_el:
+                continue
+
+            title = title_el.get_text(strip=True)
+            if title.lower() == "shop on ebay":
+                continue
+
+            # Parse price — handle ranges like "$10.00 to $20.00" by taking first
+            price_text = price_el.get_text(strip=True)
+            price_match = re.search(r"\$?([\d,]+\.?\d*)", price_text.replace(",", ""))
+            if not price_match:
+                continue
+            price = float(price_match.group(1).replace(",", ""))
+
+            date = date_el.get_text(strip=True) if date_el else "N/A"
+            link = link_el["href"].split("?")[0]  # clean URL
+
             results.append({
-                "title": item["title"][0],
+                "title": title[:60] + "…" if len(title) > 60 else title,
                 "price": price,
-                "date": end_time,
-                "url": item["viewItemURL"][0],
+                "date": date,
+                "url": link,
             })
-        except (KeyError, IndexError, ValueError):
+
+            if len(results) >= 5:
+                break
+
+        except Exception:
             continue
 
     return results
@@ -208,7 +237,7 @@ async def on_message(message: discord.Message):
             await thinking.edit(content="❌ Couldn't read the card from that image. Try a clearer photo!")
             return
 
-        # 3. Get comps
+        # 3. Scrape comps
         comps = await get_ebay_comps(query)
         print(f"Comps found: {len(comps)}")
 
@@ -227,5 +256,3 @@ async def on_message(message: discord.Message):
 
 
 bot.run(DISCORD_TOKEN)
-
-
