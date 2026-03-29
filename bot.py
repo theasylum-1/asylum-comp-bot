@@ -82,7 +82,10 @@ def build_ebay_query(card: dict) -> str:
     if card.get("set"):         parts.append(card["set"])
     if card.get("variation"):   parts.append(card["variation"])
     if card.get("card_number"): parts.append(f"#{card['card_number']}")
-    return " ".join(parts)
+    query = " ".join(parts)
+    # Strip any newlines or carriage returns
+    query = query.replace("\n", " ").replace("\r", " ").strip()
+    return query
 
 
 # ── Step 3 — Search eBay SOLD listings via Finding API ───────────────────────
