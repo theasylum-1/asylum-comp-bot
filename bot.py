@@ -16,6 +16,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Track processed messages to prevent double responses
+processed_messages = set()
+
 
 async def identify_card(image_urls: list) -> dict:
     headers = {
@@ -84,6 +87,50 @@ def build_ebay_query(card: dict) -> str:
     return query
 
 
+def extract_text_from_blocks(content_blocks: list) -> str:
+    """Extract and combine all text blocks from API response."""
+    return " ".join(
+        block.get("text", "")
+        for block in content_blocks
+        if block.get("type") == "text"
+    ).strip()
+
+
+def parse_comps_from_text(text: str) -> list:
+    """Try to parse a JSON array of comps from text."""
+    if not text.strip():
+        return []
+
+    raw = text.strip()
+    raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
+
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if not match:
+        return []
+
+    try:
+        comps = json.loads(match.group())
+    except json.JSONDecodeError:
+        return []
+
+    results = []
+    for c in comps:
+        try:
+            price = float(str(c.get("price", 0)).replace(",", "").replace("$", ""))
+            if price <= 0:
+                continue
+            results.append({
+                "title": str(c.get("title", ""))[:60],
+                "price": price,
+                "date": str(c.get("date", "N/A")),
+                "url": str(c.get("url", "")),
+            })
+        except (ValueError, TypeError):
+            continue
+
+    return results
+
+
 async def get_ebay_comps(query: str) -> list:
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
@@ -99,13 +146,20 @@ async def get_ebay_comps(query: str) -> list:
         }
     ]
 
-    # Turn 1 — ask Claude to search eBay sold listings
+    # Turn 1 — search and summarize in one shot
     messages = [
         {
             "role": "user",
             "content": (
                 f'Search eBay completed/sold listings for this trading card: "{query}"\n\n'
-                f'Use web search to find recent sold prices on eBay for this specific card.'
+                f'After searching, return ONLY a JSON array with no markdown or extra text. '
+                f'Include up to 5 recently sold eBay listings. '
+                f'Each object must have exactly these keys: '
+                f'"title" (string, max 60 chars), '
+                f'"price" (number, no $ sign), '
+                f'"date" (string), '
+                f'"url" (string, full eBay listing URL). '
+                f'If no sold listings found, return []'
             )
         }
     ]
@@ -127,27 +181,32 @@ async def get_ebay_comps(query: str) -> list:
             data1 = await resp.json()
 
     print(f"Turn 1 status: {status1}, stop_reason: {data1.get('stop_reason')}")
-    print(f"Turn 1 block types: {[b.get('type') for b in data1.get('content', [])]}")
+    block_types = [b.get('type') for b in data1.get('content', [])]
+    print(f"Turn 1 block types: {block_types}")
 
     if status1 != 200:
         print(f"Turn 1 error: {data1}")
         return []
 
-    # Add Claude's response to message history
-    messages.append({"role": "assistant", "content": data1["content"]})
+    # Try to parse comps from Turn 1 text blocks first
+    turn1_text = extract_text_from_blocks(data1.get("content", []))
+    print(f"Turn 1 text: {turn1_text[:300]}")
 
-    # Turn 2 — ask Claude to format results as JSON
+    comps = parse_comps_from_text(turn1_text)
+    if comps:
+        print(f"Got comps from Turn 1: {len(comps)}")
+        return comps
+
+    # Turn 1 didn't return JSON — do Turn 2 asking for JSON format
+    print("Turn 1 had no parseable JSON, doing Turn 2...")
+    messages.append({"role": "assistant", "content": data1["content"]})
     messages.append({
         "role": "user",
         "content": (
-            "Based on the search results above, return ONLY a JSON array with no markdown or extra text. "
-            "Include up to 5 recently sold eBay listings for this card. "
-            "Each object must have exactly these keys: "
-            "\"title\" (string, max 60 chars), "
-            "\"price\" (number, no $ sign), "
-            "\"date\" (string), "
-            "\"url\" (string, full eBay listing URL). "
-            "If no sold listings were found, return an empty array: []"
+            "Now return the sold listing data you found as ONLY a JSON array. "
+            "No markdown, no explanation, just the raw JSON array. "
+            "Each object: \"title\", \"price\" (number), \"date\", \"url\". "
+            "If nothing found, return []"
         )
     })
 
@@ -173,43 +232,10 @@ async def get_ebay_comps(query: str) -> list:
         print(f"Turn 2 error: {data2}")
         return []
 
-    # Extract text from final response
-    full_text = ""
-    for block in data2.get("content", []):
-        if block.get("type") == "text":
-            full_text += block.get("text", "")
+    turn2_text = extract_text_from_blocks(data2.get("content", []))
+    print(f"Turn 2 text: {turn2_text[:300]}")
 
-    print(f"Final text: {full_text[:500]}")
-
-    if not full_text.strip():
-        return []
-
-    # Parse JSON array
-    raw = full_text.strip()
-    raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
-
-    match = re.search(r'\[.*\]', raw, re.DOTALL)
-    if not match:
-        return []
-
-    comps = json.loads(match.group())
-
-    results = []
-    for c in comps:
-        try:
-            price = float(str(c.get("price", 0)).replace(",", "").replace("$", ""))
-            if price <= 0:
-                continue
-            results.append({
-                "title": str(c.get("title", ""))[:60],
-                "price": price,
-                "date": str(c.get("date", "N/A")),
-                "url": str(c.get("url", "")),
-            })
-        except (ValueError, TypeError):
-            continue
-
-    return results
+    return parse_comps_from_text(turn2_text)
 
 
 def format_response(card: dict, query: str, comps: list, manual: bool = False) -> discord.Embed:
@@ -274,6 +300,17 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+
+    # Prevent double-processing the same message
+    if message.id in processed_messages:
+        return
+    processed_messages.add(message.id)
+
+    # Keep the set from growing forever
+    if len(processed_messages) > 1000:
+        oldest = list(processed_messages)[:500]
+        for msg_id in oldest:
+            processed_messages.discard(msg_id)
 
     channel_match = (
         message.channel.name == PRICE_CHECK_CHANNEL
