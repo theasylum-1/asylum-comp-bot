@@ -106,7 +106,7 @@ async def get_ebay_comps(query: str) -> list:
     messages = [{"role": "user", "content": prompt}]
 
     payload = {
-        "model": "claude-haiku-4-5-20251001",
+        "model": "claude-sonnet-4-5-20250929",
         "max_tokens": 1500,
         "tools": [
             {
@@ -147,7 +147,7 @@ async def get_ebay_comps(query: str) -> list:
         messages.append({"role": "assistant", "content": content_blocks})
 
         payload2 = {
-            "model": "claude-haiku-4-5-20251001",
+            "model": "claude-sonnet-4-5-20250929",
             "max_tokens": 1500,
             "tools": [
                 {
