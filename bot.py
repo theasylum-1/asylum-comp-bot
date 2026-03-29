@@ -32,14 +32,14 @@ async def identify_card(image_urls: list) -> dict:
                 "(there may be a front and back) and return ONLY a JSON object with no markdown or explanation.\n\n"
                 "Rules:\n"
                 "- 'player': Full name of player or character on the card\n"
-                "- 'year': The year of the card. Check the back of the card carefully — it is often printed there.\n"
+                "- 'year': The year of the card. Check the back carefully — it is often printed there.\n"
                 "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
-                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name or year here.\n"
+                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name or year.\n"
                 "- 'variation': Any parallel or special version (Refractor, Holo, Auto, Autograph, Rookie, Gold, etc). Leave empty string if base.\n"
-                "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the denominator total (e.g. '75'). Leave empty string if not numbered.\n"
+                "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the denominator (e.g. '75'). Leave empty string if not numbered.\n"
                 "- 'card_number': The card's catalog number (e.g. 'AC-OS'). NOT the serial number.\n"
                 "- 'sport': Baseball, Football, Basketball, Pokemon, One Piece, etc\n\n"
-                "All values must be single-line strings with no newlines. Return empty string for any field you truly cannot determine."
+                "All values must be single-line strings with no newlines. Return empty string for any field you cannot determine."
             ),
         }
     ]
@@ -87,8 +87,8 @@ def build_ebay_query(card: dict) -> str:
 
 async def get_ebay_comps(query: str) -> list:
     """
-    Use Claude with web search to find recent eBay sold listings.
-    Returns list of dicts: {title, price, date, url}
+    Use Claude with web search (multi-turn) to find eBay sold comps.
+    Handles the server_tool_use -> web_search_tool_result flow correctly.
     """
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
@@ -97,25 +97,35 @@ async def get_ebay_comps(query: str) -> list:
     }
 
     prompt = (
-        f'Search eBay sold listings for this trading card: "{query}"\n\n'
-        f'Find the most recent completed/sold eBay listings for this exact card. '
-        f'Return ONLY a JSON array (no markdown, no explanation) with up to 5 results. '
-        f'Each result must have these exact keys: '
-        f'"title" (listing title, max 60 chars), '
-        f'"price" (sold price as a number, no $ sign), '
-        f'"date" (sold date as string), '
-        f'"url" (full eBay listing URL). '
-        f'If you cannot find any sold listings, return an empty array [].'
+        f'Search eBay completed/sold listings for this trading card: "{query}"\n\n'
+        f'Find recent sold prices on eBay for this card. '
+        f'Return ONLY a JSON array (no markdown, no extra text) with up to 5 sold listings. '
+        f'Each object must have: '
+        f'"title" (string, max 60 chars), '
+        f'"price" (number, no $ sign), '
+        f'"date" (string), '
+        f'"url" (string, full eBay URL). '
+        f'If no sold listings found, return []'
     )
+
+    messages = [{"role": "user", "content": prompt}]
 
     payload = {
         "model": "claude-sonnet-4-20250514",
-        "max_tokens": 1000,
-        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1500,
+        "tools": [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3,
+                "allowed_domains": ["ebay.com", "130point.com"]
+            }
+        ],
+        "messages": messages,
     }
 
     async with aiohttp.ClientSession() as session:
+        # First API call — Claude will use web search
         async with session.post(
             "https://api.anthropic.com/v1/messages",
             headers=headers,
@@ -123,26 +133,64 @@ async def get_ebay_comps(query: str) -> list:
         ) as resp:
             data = await resp.json()
 
-    # Extract text from response content blocks
+    print(f"First response stop_reason: {data.get('stop_reason')}")
+    print(f"Content blocks: {[b.get('type') for b in data.get('content', [])]}")
+
+    # If Claude used web search, we need to continue the conversation
+    # so it can formulate its final text response
+    if data.get("stop_reason") in ("tool_use", "pause_turn") or any(
+        b.get("type") in ("server_tool_use", "web_search_tool_result")
+        for b in data.get("content", [])
+    ):
+        # Add Claude's response (with tool use) to messages
+        messages.append({"role": "assistant", "content": data["content"]})
+
+        # Second API call — Claude generates final text response using search results
+        payload2 = {
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1500,
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search",
+                    "max_uses": 3,
+                    "allowed_domains": ["ebay.com", "130point.com"]
+                }
+            ],
+            "messages": messages,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload2,
+            ) as resp2:
+                data = await resp2.json()
+
+        print(f"Second response stop_reason: {data.get('stop_reason')}")
+
+    # Extract text from final response
     full_text = ""
     for block in data.get("content", []):
         if block.get("type") == "text":
             full_text += block.get("text", "")
 
-    print(f"Claude comps response: {full_text[:500]}")
+    print(f"Final Claude response: {full_text[:500]}")
+
+    if not full_text.strip():
+        return []
 
     # Parse JSON array from response
     raw = full_text.strip()
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
 
-    # Find JSON array in response
     match = re.search(r'\[.*\]', raw, re.DOTALL)
     if not match:
         return []
 
     comps = json.loads(match.group())
 
-    # Validate and clean results
     results = []
     for c in comps:
         try:
