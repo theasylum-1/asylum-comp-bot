@@ -57,7 +57,6 @@ async def identify_card(image_url: str) -> dict:
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
     card = json.loads(raw)
 
-    # Sanitize all values - remove newlines from every field
     for key in card:
         if isinstance(card[key], str):
             card[key] = card[key].replace("\n", " ").replace("\r", " ").strip()
@@ -74,7 +73,7 @@ def build_ebay_query(card: dict) -> str:
     if card.get("variation"):   parts.append(card["variation"])
     if card.get("card_number"): parts.append(f"#{card['card_number']}")
     query = " ".join(parts)
-    query = query.replace("\n", " ").replace("\r", " ").strip()
+    query = re.sub(r"[\r\n\t]+", " ", query).strip()
     return query
 
 
@@ -195,6 +194,7 @@ async def on_message(message: discord.Message):
 
     try:
         image_url = image_attachments[0].url
+        print(f"Image URL: {repr(image_url)}")
 
         # 1. Identify card
         card = await identify_card(image_url)
@@ -210,6 +210,7 @@ async def on_message(message: discord.Message):
 
         # 3. Get comps
         comps = await get_ebay_comps(query)
+        print(f"Comps found: {len(comps)}")
 
         # 4. Send embed
         embed = format_response(card, query, comps)
@@ -218,9 +219,13 @@ async def on_message(message: discord.Message):
 
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         await thinking.edit(content="❌ Something went wrong pulling comps. Try again or check the logs.")
 
     await bot.process_commands(message)
 
 
 bot.run(DISCORD_TOKEN)
+
+
