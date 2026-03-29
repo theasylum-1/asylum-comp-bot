@@ -10,7 +10,6 @@ from urllib.parse import quote_plus
 # Config
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 PRICE_CHECK_CHANNEL = "price-check"
 
 intents = discord.Intents.default()
@@ -74,7 +73,7 @@ async def identify_card(image_urls: list) -> dict:
     return card
 
 
-def build_ebay_query(card: dict) -> str:
+def build_search_query(card: dict) -> str:
     parts = []
     if card.get("year"):      parts.append(card["year"])
     if card.get("player"):    parts.append(card["player"])
@@ -86,141 +85,33 @@ def build_ebay_query(card: dict) -> str:
     return re.sub(r"[\r\n\t]+", " ", query).strip()
 
 
-async def get_ebay_comps(query: str) -> list:
-    """
-    Give Claude the exact eBay sold listings URL and ask it to extract prices.
-    """
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-    # Build the exact eBay sold listings URL
+def build_links(query: str) -> dict:
     encoded = quote_plus(query)
-    ebay_url = (
-        f"https://www.ebay.com/sch/i.html"
-        f"?_nkw={encoded}"
-        f"&LH_Complete=1"
-        f"&LH_Sold=1"
-        f"&_sop=13"
-        f"&_ipg=10"
-    )
-
-    print(f"eBay URL: {ebay_url}")
-
-    tools = [
-        {
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": 2,
-        }
-    ]
-
-    prompt = f"""I need you to find recent sold prices for this trading card: "{query}"
-
-Please search for sold eBay listings using this exact URL: {ebay_url}
-
-Also try searching: site:ebay.com "{query}" sold
-
-Extract the sold listing data and respond with ONLY a JSON array in this exact format:
-[
-  {{"title": "listing title", "price": 25.00, "date": "Mar 2025", "url": "https://www.ebay.com/itm/..."}}
-]
-
-Important:
-- price must be a number (no $ sign)  
-- Up to 5 results maximum
-- Only SOLD/COMPLETED listings with actual sale prices
-- Respond with ONLY the JSON array, nothing else
-- If no sold listings found, respond with exactly: []"""
-
-    messages = [{"role": "user", "content": prompt}]
-
-    payload = {
-        "model": "claude-sonnet-4-5-20250929",
-        "max_tokens": 2000,
-        "tools": tools,
-        "messages": messages,
+    return {
+        "130point": f"https://130point.com/sales/?q={encoded}",
+        "ebay_sold": (
+            f"https://www.ebay.com/sch/i.html"
+            f"?_nkw={encoded}"
+            f"&LH_Complete=1"
+            f"&LH_Sold=1"
+            f"&_sop=13"
+        ),
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=payload,
-        ) as resp:
-            status = resp.status
-            data = await resp.json()
 
-    print(f"API status: {status}, stop_reason: {data.get('stop_reason')}")
-    block_types = [b.get("type") for b in data.get("content", [])]
-    print(f"Block types: {block_types}")
-
-    if status != 200:
-        print(f"API error: {data}")
-        return []
-
-    full_text = " ".join(
-        b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
-    ).strip()
-
-    print(f"Full text: {full_text[:800]}")
-
-    if not full_text:
-        return []
-
-    raw = re.sub(r"^```json\s*|^```\s*|```$", "", full_text, flags=re.MULTILINE).strip()
-    match = re.search(r'\[.*?\]', raw, re.DOTALL)
-    if not match:
-        print("No JSON array found")
-        return []
-
-    try:
-        comps = json.loads(match.group())
-    except json.JSONDecodeError as e:
-        print(f"JSON parse error: {e}")
-        return []
-
-    results = []
-    for c in comps:
-        try:
-            price = float(str(c.get("price", 0)).replace(",", "").replace("$", ""))
-            if price <= 0:
-                continue
-            results.append({
-                "title": str(c.get("title", ""))[:60],
-                "price": price,
-                "date": str(c.get("date", "N/A")),
-                "url": str(c.get("url", "")),
-            })
-        except (ValueError, TypeError):
-            continue
-
-    return results
-
-
-def format_response(card: dict, query: str, comps: list, manual: bool = False) -> discord.Embed:
-    if comps:
-        prices = [c["price"] for c in comps]
-        avg = sum(prices) / len(prices)
-        color = discord.Color.green()
-    else:
-        avg = None
-        color = discord.Color.orange()
+def format_response(card: dict, query: str, links: dict, manual: bool = False) -> discord.Embed:
+    card_name = " ".join(filter(None, [
+        card.get("year"), card.get("player"),
+        card.get("brand"), card.get("set"), card.get("variation"),
+        f"/{card['serial']}" if card.get("serial") else ""
+    ])) or query
 
     if manual:
         card_name = query
-    else:
-        card_name = " ".join(filter(None, [
-            card.get("year"), card.get("player"),
-            card.get("brand"), card.get("set"), card.get("variation"),
-            f"/{card['serial']}" if card.get("serial") else ""
-        ])) or query
 
     embed = discord.Embed(
-        title=f"📊 eBay Comps — {card_name}",
-        color=color,
+        title=f"🃏 {card_name}",
+        color=discord.Color.blue(),
         timestamp=datetime.utcnow(),
     )
 
@@ -230,26 +121,30 @@ def format_response(card: dict, query: str, comps: list, manual: bool = False) -
         inline=False
     )
 
-    if avg is not None:
-        embed.add_field(name="💰 Avg Sold Price", value=f"**${avg:.2f}**", inline=True)
-        embed.add_field(name="📦 Sales Found", value=str(len(comps)), inline=True)
+    # Card details if identified by AI
+    if not manual and card:
+        details = []
+        if card.get("sport"):     details.append(f"**Sport:** {card['sport']}")
+        if card.get("brand"):     details.append(f"**Brand:** {card['brand']}")
+        if card.get("set"):       details.append(f"**Set:** {card['set']}")
+        if card.get("year"):      details.append(f"**Year:** {card['year']}")
+        if card.get("variation"): details.append(f"**Variation:** {card['variation']}")
+        if card.get("serial"):    details.append(f"**Print Run:** /{card['serial']}")
+        if card.get("card_number"): details.append(f"**Card #:** {card['card_number']}")
+        if details:
+            embed.add_field(name="📋 Card Details", value="\n".join(details), inline=False)
 
-    if comps:
-        sales_lines = "\n".join(
-            f"[${c['price']:.2f} — {c['date']}]({c['url']})" for c in comps
-        )
-        embed.add_field(name="🧾 Last Sales", value=sales_lines, inline=False)
-    else:
-        embed.add_field(
-            name="⚠️ No Sales Found",
-            value=(
-                "Try posting clearer front **and back** photos, "
-                "or add a caption like:\n`2021 Tarik Skubal Topps Chrome Rookie`"
-            ),
-            inline=False,
-        )
+    # Comp links
+    embed.add_field(
+        name="💰 Check Sold Comps",
+        value=(
+            f"[🔗 130point Sold Sales]({links['130point']})\n"
+            f"[🔗 eBay Sold Listings]({links['ebay_sold']})"
+        ),
+        inline=False
+    )
 
-    embed.set_footer(text="The Asylum • eBay Comp Bot")
+    embed.set_footer(text="The Asylum • eBay Comp Bot | Click links above for sold prices")
     return embed
 
 
@@ -287,7 +182,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    thinking = await message.reply("🔍 Identifying your card and pulling eBay comps… hang tight!")
+    thinking = await message.reply("🔍 Identifying your card… hang tight!")
 
     try:
         image_urls = [a.url for a in image_attachments[:2]]
@@ -304,22 +199,20 @@ async def on_message(message: discord.Message):
         else:
             card = await identify_card(image_urls)
             print(f"Card identified: {card}")
-            query = build_ebay_query(card)
-            print(f"eBay query: {repr(query)}")
+            query = build_search_query(card)
+            print(f"Search query: {repr(query)}")
 
         if not query.strip():
             await thinking.edit(
                 content=(
                     "❌ Couldn't identify the card. Try posting front **and back** together, "
-                    "or add a caption like:\n`2021 Tarik Skubal Topps Chrome Rookie`"
+                    "or add a caption like:\n`2022 Topps Brooklyn Collection Ozzie Smith Auto /75`"
                 )
             )
             return
 
-        comps = await get_ebay_comps(query)
-        print(f"Comps found: {len(comps)}")
-
-        embed = format_response(card, query, comps, manual=manual)
+        links = build_links(query)
+        embed = format_response(card, query, links, manual=manual)
         await thinking.delete()
         await message.reply(embed=embed)
 
