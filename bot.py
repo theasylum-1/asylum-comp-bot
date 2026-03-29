@@ -18,38 +18,44 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-async def identify_card(image_url: str) -> dict:
+async def identify_card(image_urls: list) -> dict:
+    """
+    Send up to 2 card images (front + back) to GPT-4o for identification.
+    """
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
+
+    # Build content array — text prompt first, then all images
+    content = [
+        {
+            "type": "text",
+            "text": (
+                "You are an expert trading card identifier. Carefully examine all provided card images "
+                "(there may be a front and back) and return ONLY a JSON object with no markdown or explanation.\n\n"
+                "Rules:\n"
+                "- 'player': Full name of player or character on the card\n"
+                "- 'year': The year of the card. Check the back of the card carefully — it is often printed there. Make your best guess based on design era if not visible.\n"
+                "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
+                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name or year here. Check the back of the card.\n"
+                "- 'variation': Any parallel or special version (Refractor, Holo, Auto, Autograph, Rookie, Gold, etc). Leave empty string if base.\n"
+                "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the denominator total (e.g. '75' or '99'). Leave empty string if not numbered.\n"
+                "- 'card_number': The card's catalog number (e.g. 'AC-OS'). NOT the serial number.\n"
+                "- 'sport': Baseball, Football, Basketball, Pokemon, One Piece, etc\n\n"
+                "All values must be single-line strings with no newlines. Return empty string for any field you truly cannot determine."
+            ),
+        }
+    ]
+
+    # Add each image
+    for url in image_urls:
+        content.append({"type": "image_url", "image_url": {"url": url}})
+
     payload = {
         "model": "gpt-4o",
         "max_tokens": 500,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "You are an expert trading card identifier. Look at this card image carefully and return ONLY a JSON object with no markdown or explanation.\n\n"
-                            "Rules:\n"
-                            "- 'player': Full name of player or character on the card\n"
-                            "- 'year': The year printed on the card. Look carefully at the bottom, back, or corners. Make your best guess based on the design era if not visible.\n"
-                            "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
-                            "- 'set': The specific set name (Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name here.\n"
-                            "- 'variation': Any parallel or special version (Refractor, Holo, Auto, Rookie, Gold, etc). Leave empty string if base.\n"
-                            "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the total (e.g. '75' or '99'). This is different from card number. Leave empty string if not numbered.\n"
-                            "- 'card_number': The card's catalog number (e.g. '#247'). NOT the serial number.\n"
-                            "- 'sport': Baseball, Football, Basketball, Pokemon, One Piece, etc\n\n"
-                            "All values must be single-line strings with no newlines. Return empty string for any field you truly cannot determine."
-                        ),
-                    },
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            }
-        ],
+        "messages": [{"role": "user", "content": content}],
     }
 
     async with aiohttp.ClientSession() as session:
@@ -78,9 +84,7 @@ def build_ebay_query(card: dict) -> str:
     if card.get("brand"):     parts.append(card["brand"])
     if card.get("set"):       parts.append(card["set"])
     if card.get("variation"): parts.append(card["variation"])
-    # Add print run as /75 format — eBay sellers list it this way
     if card.get("serial"):    parts.append(f"/{card['serial']}")
-
     query = " ".join(parts)
     query = re.sub(r"[\r\n\t]+", " ", query).strip()
     return query
@@ -153,7 +157,7 @@ async def get_ebay_comps(query: str) -> list:
     return results
 
 
-def format_response(card: dict, query: str, comps: list) -> discord.Embed:
+def format_response(card: dict, query: str, comps: list, manual: bool = False) -> discord.Embed:
     if comps:
         prices = [c["price"] for c in comps]
         avg = sum(prices) / len(prices)
@@ -162,11 +166,14 @@ def format_response(card: dict, query: str, comps: list) -> discord.Embed:
         avg = None
         color = discord.Color.orange()
 
-    card_name = " ".join(filter(None, [
-        card.get("year"), card.get("player"),
-        card.get("brand"), card.get("set"), card.get("variation"),
-        f"/{card['serial']}" if card.get("serial") else ""
-    ])) or query
+    if manual:
+        card_name = query
+    else:
+        card_name = " ".join(filter(None, [
+            card.get("year"), card.get("player"),
+            card.get("brand"), card.get("set"), card.get("variation"),
+            f"/{card['serial']}" if card.get("serial") else ""
+        ])) or query
 
     embed = discord.Embed(
         title=f"📊 eBay Comps — {card_name}",
@@ -174,7 +181,11 @@ def format_response(card: dict, query: str, comps: list) -> discord.Embed:
         timestamp=datetime.utcnow(),
     )
 
-    embed.add_field(name="🔍 Search Used", value=f"`{query}`", inline=False)
+    embed.add_field(
+        name="🔍 Search Used",
+        value=f"`{query}`" + (" *(manual)*" if manual else ""),
+        inline=False
+    )
 
     if avg is not None:
         embed.add_field(name="💰 Avg Sold Price", value=f"**${avg:.2f}**", inline=True)
@@ -188,7 +199,10 @@ def format_response(card: dict, query: str, comps: list) -> discord.Embed:
     else:
         embed.add_field(
             name="⚠️ No Sales Found",
-            value="Try posting a clearer image or manually search eBay.",
+            value=(
+                "Try posting clearer front **and back** photos, "
+                "or add a caption like:\n`2022 Topps Brooklyn Collection Ozzie Smith Auto /75`"
+            ),
             inline=False,
         )
 
@@ -214,6 +228,7 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # Only act if there's at least one image
     image_attachments = [
         a for a in message.attachments
         if a.content_type and a.content_type.startswith("image/")
@@ -225,27 +240,43 @@ async def on_message(message: discord.Message):
     thinking = await message.reply("🔍 Identifying your card and pulling eBay comps… hang tight!")
 
     try:
-        image_url = image_attachments[0].url
-        print(f"Image URL: {repr(image_url)}")
+        # Collect up to 2 image URLs (front + back)
+        image_urls = [a.url for a in image_attachments[:2]]
+        print(f"Images received: {len(image_urls)}")
 
-        # 1. Identify card
-        card = await identify_card(image_url)
-        print(f"Card identified: {card}")
+        # Check if the member typed a manual search caption
+        caption = message.content.strip() if message.content.strip() else None
+        manual = False
 
-        # 2. Build query
-        query = build_ebay_query(card)
-        print(f"eBay query: {repr(query)}")
+        if caption:
+            # Use the caption directly as the eBay query
+            query = re.sub(r"[\r\n\t]+", " ", caption).strip()
+            card = {}
+            manual = True
+            print(f"Manual query from caption: {repr(query)}")
+        else:
+            # Use AI to identify the card from image(s)
+            card = await identify_card(image_urls)
+            print(f"Card identified: {card}")
+            query = build_ebay_query(card)
+            print(f"eBay query: {repr(query)}")
 
         if not query.strip():
-            await thinking.edit(content="❌ Couldn't read the card from that image. Try a clearer photo!")
+            await thinking.edit(
+                content=(
+                    "❌ Couldn't identify the card from that image.\n"
+                    "Try posting the **front and back** together, or add a caption like:\n"
+                    "`2022 Topps Brooklyn Collection Ozzie Smith Auto /75`"
+                )
+            )
             return
 
-        # 3. Scrape comps
+        # Scrape comps
         comps = await get_ebay_comps(query)
         print(f"Comps found: {len(comps)}")
 
-        # 4. Send embed
-        embed = format_response(card, query, comps)
+        # Send embed
+        embed = format_response(card, query, comps, manual=manual)
         await thinking.delete()
         await message.reply(embed=embed)
 
