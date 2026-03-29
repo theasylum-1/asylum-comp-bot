@@ -1,34 +1,24 @@
 import discord
 from discord.ext import commands
 import aiohttp
-from bs4 import BeautifulSoup
 import os
 import json
 import re
-import random
 from datetime import datetime
-from urllib.parse import quote_plus
 
 # Config
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 PRICE_CHECK_CHANNEL = "price-check"
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Rotating user agents to avoid bot detection
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-]
-
 
 async def identify_card(image_urls: list) -> dict:
+    """Use GPT-4o vision to identify the card from front/back images."""
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
@@ -42,11 +32,11 @@ async def identify_card(image_urls: list) -> dict:
                 "(there may be a front and back) and return ONLY a JSON object with no markdown or explanation.\n\n"
                 "Rules:\n"
                 "- 'player': Full name of player or character on the card\n"
-                "- 'year': The year of the card. Check the back of the card carefully — it is often printed there. Make your best guess based on design era if not visible.\n"
+                "- 'year': The year of the card. Check the back of the card carefully — it is often printed there.\n"
                 "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
-                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name or year here. Check the back of the card.\n"
+                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name or year here.\n"
                 "- 'variation': Any parallel or special version (Refractor, Holo, Auto, Autograph, Rookie, Gold, etc). Leave empty string if base.\n"
-                "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the denominator total (e.g. '75' or '99'). Leave empty string if not numbered.\n"
+                "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the denominator total (e.g. '75'). Leave empty string if not numbered.\n"
                 "- 'card_number': The card's catalog number (e.g. 'AC-OS'). NOT the serial number.\n"
                 "- 'sport': Baseball, Football, Basketball, Pokemon, One Piece, etc\n\n"
                 "All values must be single-line strings with no newlines. Return empty string for any field you truly cannot determine."
@@ -96,75 +86,76 @@ def build_ebay_query(card: dict) -> str:
 
 
 async def get_ebay_comps(query: str) -> list:
-    encoded = quote_plus(query)
-    url = (
-        f"https://www.ebay.com/sch/i.html"
-        f"?_nkw={encoded}"
-        f"&LH_Complete=1"
-        f"&LH_Sold=1"
-        f"&_sop=13"
-        f"&_ipg=10"
-    )
-
+    """
+    Use Claude with web search to find recent eBay sold listings.
+    Returns list of dicts: {title, price, date, url}
+    """
     headers = {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
     }
 
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        async with session.get(url, headers=headers, allow_redirects=True) as resp:
-            html = await resp.text()
+    prompt = (
+        f'Search eBay sold listings for this trading card: "{query}"\n\n'
+        f'Find the most recent completed/sold eBay listings for this exact card. '
+        f'Return ONLY a JSON array (no markdown, no explanation) with up to 5 results. '
+        f'Each result must have these exact keys: '
+        f'"title" (listing title, max 60 chars), '
+        f'"price" (sold price as a number, no $ sign), '
+        f'"date" (sold date as string), '
+        f'"url" (full eBay listing URL). '
+        f'If you cannot find any sold listings, return an empty array [].'
+    )
 
-    print(f"eBay response length: {len(html)}")
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1000,
+        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        "messages": [{"role": "user", "content": prompt}],
+    }
 
-    soup = BeautifulSoup(html, "html.parser")
-    items = soup.select(".s-item__info")
-    print(f"Items found in HTML: {len(items)}")
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+        ) as resp:
+            data = await resp.json()
 
+    # Extract text from response content blocks
+    full_text = ""
+    for block in data.get("content", []):
+        if block.get("type") == "text":
+            full_text += block.get("text", "")
+
+    print(f"Claude comps response: {full_text[:500]}")
+
+    # Parse JSON array from response
+    raw = full_text.strip()
+    raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
+
+    # Find JSON array in response
+    match = re.search(r'\[.*\]', raw, re.DOTALL)
+    if not match:
+        return []
+
+    comps = json.loads(match.group())
+
+    # Validate and clean results
     results = []
-    for item in items:
+    for c in comps:
         try:
-            title_el = item.select_one(".s-item__title")
-            price_el = item.select_one(".s-item__price")
-            date_el  = item.select_one(".s-item__ended-date, .s-item__listingDate")
-            link_el  = item.select_one("a.s-item__link")
-
-            if not title_el or not price_el or not link_el:
+            price = float(str(c.get("price", 0)).replace(",", "").replace("$", ""))
+            if price <= 0:
                 continue
-
-            title = title_el.get_text(strip=True)
-            if title.lower() == "shop on ebay":
-                continue
-
-            price_text = price_el.get_text(strip=True)
-            price_match = re.search(r"\$?([\d,]+\.?\d*)", price_text.replace(",", ""))
-            if not price_match:
-                continue
-            price = float(price_match.group(1).replace(",", ""))
-
-            date = date_el.get_text(strip=True) if date_el else "N/A"
-            link = link_el["href"].split("?")[0]
-
             results.append({
-                "title": title[:60] + "…" if len(title) > 60 else title,
+                "title": str(c.get("title", ""))[:60],
                 "price": price,
-                "date": date,
-                "url": link,
+                "date": str(c.get("date", "N/A")),
+                "url": str(c.get("url", "")),
             })
-
-            if len(results) >= 5:
-                break
-
-        except Exception:
+        except (ValueError, TypeError):
             continue
 
     return results
