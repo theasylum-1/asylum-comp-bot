@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["python311"]
+nixPkgs = ["python311", "gcc"]
 
 [phases.install]
-cmds = ["pip install py-cord==2.6.1 aiohttp==3.9.3"]
+cmds = ["python3.11 -m pip install discord.py==2.3.2 aiohttp==3.9.3"]
 
 [start]
-cmd = "python bot.py"
+cmd = "python3.11 bot.py"
