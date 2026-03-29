@@ -25,7 +25,7 @@ async def identify_card(image_url: str) -> dict:
     }
     payload = {
         "model": "gpt-4o",
-        "max_tokens": 300,
+        "max_tokens": 500,
         "messages": [
             {
                 "role": "user",
@@ -33,11 +33,17 @@ async def identify_card(image_url: str) -> dict:
                     {
                         "type": "text",
                         "text": (
-                            "Look at this trading card image and return ONLY a JSON object "
-                            "(no markdown, no explanation) with these keys: "
-                            "player, year, brand, set, variation, card_number, sport. "
-                            "All values must be single-line strings with no newlines. "
-                            "If any field cannot be determined write an empty string."
+                            "You are an expert trading card identifier. Look at this card image carefully and return ONLY a JSON object with no markdown or explanation.\n\n"
+                            "Rules:\n"
+                            "- 'player': Full name of player or character on the card\n"
+                            "- 'year': The year printed on the card. Look carefully at the bottom, back, or corners. Make your best guess based on the design era if not visible.\n"
+                            "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
+                            "- 'set': The specific set name (Chrome, Prizm, Heritage, Base Set, etc). Do NOT include the brand name here.\n"
+                            "- 'variation': Any parallel or special version (Refractor, Holo, Auto, Rookie, Gold, etc). Leave empty string if base.\n"
+                            "- 'serial': If the card has a print run like '54/75' or '23/99', put ONLY the total (e.g. '75' or '99'). This is different from card number. Leave empty string if not numbered.\n"
+                            "- 'card_number': The card's catalog number (e.g. '#247'). NOT the serial number.\n"
+                            "- 'sport': Baseball, Football, Basketball, Pokemon, One Piece, etc\n\n"
+                            "All values must be single-line strings with no newlines. Return empty string for any field you truly cannot determine."
                         ),
                     },
                     {"type": "image_url", "image_url": {"url": image_url}},
@@ -67,24 +73,21 @@ async def identify_card(image_url: str) -> dict:
 
 def build_ebay_query(card: dict) -> str:
     parts = []
-    if card.get("year"):        parts.append(card["year"])
-    if card.get("player"):      parts.append(card["player"])
-    if card.get("brand"):       parts.append(card["brand"])
-    if card.get("set"):         parts.append(card["set"])
-    if card.get("variation"):   parts.append(card["variation"])
-    if card.get("card_number"): parts.append(f"#{card['card_number']}")
+    if card.get("year"):      parts.append(card["year"])
+    if card.get("player"):    parts.append(card["player"])
+    if card.get("brand"):     parts.append(card["brand"])
+    if card.get("set"):       parts.append(card["set"])
+    if card.get("variation"): parts.append(card["variation"])
+    # Add print run as /75 format — eBay sellers list it this way
+    if card.get("serial"):    parts.append(f"/{card['serial']}")
+
     query = " ".join(parts)
     query = re.sub(r"[\r\n\t]+", " ", query).strip()
     return query
 
 
 async def get_ebay_comps(query: str) -> list:
-    """
-    Scrapes eBay completed/sold listings directly — no API key needed.
-    Returns list of dicts: {title, price, date, url}
-    """
     encoded = quote_plus(query)
-    # LH_Complete=1 = completed listings, LH_Sold=1 = sold only, _sop=13 = newest first
     url = (
         f"https://www.ebay.com/sch/i.html"
         f"?_nkw={encoded}"
@@ -125,7 +128,6 @@ async def get_ebay_comps(query: str) -> list:
             if title.lower() == "shop on ebay":
                 continue
 
-            # Parse price — handle ranges like "$10.00 to $20.00" by taking first
             price_text = price_el.get_text(strip=True)
             price_match = re.search(r"\$?([\d,]+\.?\d*)", price_text.replace(",", ""))
             if not price_match:
@@ -133,7 +135,7 @@ async def get_ebay_comps(query: str) -> list:
             price = float(price_match.group(1).replace(",", ""))
 
             date = date_el.get_text(strip=True) if date_el else "N/A"
-            link = link_el["href"].split("?")[0]  # clean URL
+            link = link_el["href"].split("?")[0]
 
             results.append({
                 "title": title[:60] + "…" if len(title) > 60 else title,
@@ -162,7 +164,8 @@ def format_response(card: dict, query: str, comps: list) -> discord.Embed:
 
     card_name = " ".join(filter(None, [
         card.get("year"), card.get("player"),
-        card.get("brand"), card.get("set"), card.get("variation")
+        card.get("brand"), card.get("set"), card.get("variation"),
+        f"/{card['serial']}" if card.get("serial") else ""
     ])) or query
 
     embed = discord.Embed(
