@@ -18,7 +18,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 async def identify_card(image_urls: list) -> dict:
-    """Use GPT-4o vision to identify the card from front/back images."""
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
@@ -86,10 +85,6 @@ def build_ebay_query(card: dict) -> str:
 
 
 async def get_ebay_comps(query: str) -> list:
-    """
-    Use Claude with web search (multi-turn) to find eBay sold comps.
-    Handles the server_tool_use -> web_search_tool_result flow correctly.
-    """
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
@@ -111,50 +106,54 @@ async def get_ebay_comps(query: str) -> list:
     messages = [{"role": "user", "content": prompt}]
 
     payload = {
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5-20251001",
         "max_tokens": 1500,
         "tools": [
             {
                 "type": "web_search_20250305",
                 "name": "web_search",
                 "max_uses": 3,
-                "allowed_domains": ["ebay.com", "130point.com"]
             }
         ],
         "messages": messages,
     }
 
     async with aiohttp.ClientSession() as session:
-        # First API call — Claude will use web search
         async with session.post(
             "https://api.anthropic.com/v1/messages",
             headers=headers,
             json=payload,
         ) as resp:
+            status = resp.status
             data = await resp.json()
 
-    print(f"First response stop_reason: {data.get('stop_reason')}")
-    print(f"Content blocks: {[b.get('type') for b in data.get('content', [])]}")
+    print(f"Anthropic API status: {status}")
+    print(f"Full API response: {json.dumps(data)[:1000]}")
 
-    # If Claude used web search, we need to continue the conversation
-    # so it can formulate its final text response
-    if data.get("stop_reason") in ("tool_use", "pause_turn") or any(
+    if status != 200:
+        print(f"API Error: {data}")
+        return []
+
+    stop_reason = data.get("stop_reason")
+    content_blocks = data.get("content", [])
+    print(f"Stop reason: {stop_reason}")
+    print(f"Content block types: {[b.get('type') for b in content_blocks]}")
+
+    # If web search was used, continue conversation for final answer
+    if stop_reason in ("tool_use", "pause_turn") or any(
         b.get("type") in ("server_tool_use", "web_search_tool_result")
-        for b in data.get("content", [])
+        for b in content_blocks
     ):
-        # Add Claude's response (with tool use) to messages
-        messages.append({"role": "assistant", "content": data["content"]})
+        messages.append({"role": "assistant", "content": content_blocks})
 
-        # Second API call — Claude generates final text response using search results
         payload2 = {
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-5-20251001",
             "max_tokens": 1500,
             "tools": [
                 {
                     "type": "web_search_20250305",
                     "name": "web_search",
                     "max_uses": 3,
-                    "allowed_domains": ["ebay.com", "130point.com"]
                 }
             ],
             "messages": messages,
@@ -166,22 +165,23 @@ async def get_ebay_comps(query: str) -> list:
                 headers=headers,
                 json=payload2,
             ) as resp2:
+                status2 = resp2.status
                 data = await resp2.json()
 
-        print(f"Second response stop_reason: {data.get('stop_reason')}")
+        print(f"Second API status: {status2}")
+        print(f"Second response: {json.dumps(data)[:1000]}")
 
-    # Extract text from final response
+    # Extract text
     full_text = ""
     for block in data.get("content", []):
         if block.get("type") == "text":
             full_text += block.get("text", "")
 
-    print(f"Final Claude response: {full_text[:500]}")
+    print(f"Final text: {full_text[:500]}")
 
     if not full_text.strip():
         return []
 
-    # Parse JSON array from response
     raw = full_text.strip()
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
 
