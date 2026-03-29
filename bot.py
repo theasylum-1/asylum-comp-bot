@@ -1,32 +1,23 @@
 import discord
 from discord.ext import commands
 import aiohttp
-import base64
 import os
 import json
 import re
 from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────────────────
-DISCORD_TOKEN   = os.environ["DISCORD_TOKEN"]
-OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
-EBAY_APP_ID     = os.environ["EBAY_APP_ID"]
-
-# The name (or ID) of the channel where members post card photos
-PRICE_CHECK_CHANNEL = "price-check"   # change if your channel has a different name
-# ──────────────────────────────────────────────────────────────────────────────
+# Config
+DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+EBAY_APP_ID = os.environ["EBAY_APP_ID"]
+PRICE_CHECK_CHANNEL = "price-check"
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ── Step 1 — Ask OpenAI Vision to identify the card ───────────────────────────
 async def identify_card(image_url: str) -> dict:
-    """
-    Send the image to GPT-4o and get back structured card info.
-    Returns a dict with keys: player, year, brand, set, variation, card_number
-    """
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
@@ -42,14 +33,9 @@ async def identify_card(image_url: str) -> dict:
                         "type": "text",
                         "text": (
                             "Look at this trading card image and return ONLY a JSON object "
-                            "(no markdown, no explanation) with these keys:\n"
-                            "  player      - full name of player or character\n"
-                            "  year        - year printed on card (or best guess)\n"
-                            "  brand       - manufacturer (Topps, Panini, Pokemon, etc.)\n"
-                            "  set         - set name (e.g. Chrome, Prizm, Base Set)\n"
-                            "  variation   - parallel/variation (e.g. Refractor, Holo, PSA 10) or empty string\n"
-                            "  card_number - card number if visible or empty string\n"
-                            "  sport       - sport or game (Baseball, Football, Pokemon, One Piece, etc.)\n"
+                            "(no markdown, no explanation) with these keys: "
+                            "player, year, brand, set, variation, card_number, sport. "
+                            "All values must be single-line strings with no newlines. "
                             "If any field cannot be determined write an empty string."
                         ),
                     },
@@ -68,16 +54,18 @@ async def identify_card(image_url: str) -> dict:
             data = await resp.json()
 
     raw = data["choices"][0]["message"]["content"].strip()
-    # Strip possible ```json fences
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
-    return json.loads(raw)
+    card = json.loads(raw)
+
+    # Sanitize all values - remove newlines from every field
+    for key in card:
+        if isinstance(card[key], str):
+            card[key] = card[key].replace("\n", " ").replace("\r", " ").strip()
+
+    return card
 
 
-# ── Step 2 — Build a clean eBay search query from the card info ───────────────
-# 2. Build query
-        print(f"Card identified: {card}")
-        query = build_ebay_query(card)
-        print(f"eBay query: {repr(query)}")
+def build_ebay_query(card: dict) -> str:
     parts = []
     if card.get("year"):        parts.append(card["year"])
     if card.get("player"):      parts.append(card["player"])
@@ -90,22 +78,17 @@ async def identify_card(image_url: str) -> dict:
     return query
 
 
-# ── Step 3 — Search eBay SOLD listings via Finding API ───────────────────────
-async def get_ebay_comps(query: str) -> list[dict]:
-    """
-    Uses eBay's Finding API (completedItems=true) to get the last 5 sold listings.
-    Returns a list of dicts: {title, price, date, url}
-    """
+async def get_ebay_comps(query: str) -> list:
     params = {
-        "OPERATION-NAME":        "findCompletedItems",
-        "SERVICE-VERSION":       "1.0.0",
-        "SECURITY-APPNAME":      EBAY_APP_ID,
-        "RESPONSE-DATA-FORMAT":  "JSON",
-        "REST-PAYLOAD":          "",
-        "keywords":              query,
-        "itemFilter(0).name":    "SoldItemsOnly",
-        "itemFilter(0).value":   "true",
-        "sortOrder":             "EndTimeSoonest",
+        "OPERATION-NAME": "findCompletedItems",
+        "SERVICE-VERSION": "1.0.0",
+        "SECURITY-APPNAME": EBAY_APP_ID,
+        "RESPONSE-DATA-FORMAT": "JSON",
+        "REST-PAYLOAD": "",
+        "keywords": query,
+        "itemFilter(0).name": "SoldItemsOnly",
+        "itemFilter(0).value": "true",
+        "sortOrder": "EndTimeSoonest",
         "paginationInput.entriesPerPage": "5",
     }
 
@@ -117,8 +100,8 @@ async def get_ebay_comps(query: str) -> list[dict]:
     try:
         items = (
             data["findCompletedItemsResponse"][0]
-               ["searchResult"][0]
-               ["item"]
+            ["searchResult"][0]
+            ["item"]
         )
     except (KeyError, IndexError):
         return []
@@ -127,12 +110,12 @@ async def get_ebay_comps(query: str) -> list[dict]:
     for item in items[:5]:
         try:
             price = float(item["sellingStatus"][0]["currentPrice"][0]["__value__"])
-            end_time = item["listingInfo"][0]["endTime"][0][:10]   # YYYY-MM-DD
+            end_time = item["listingInfo"][0]["endTime"][0][:10]
             results.append({
                 "title": item["title"][0],
                 "price": price,
-                "date":  end_time,
-                "url":   item["viewItemURL"][0],
+                "date": end_time,
+                "url": item["viewItemURL"][0],
             })
         except (KeyError, IndexError, ValueError):
             continue
@@ -140,17 +123,15 @@ async def get_ebay_comps(query: str) -> list[dict]:
     return results
 
 
-# ── Step 4 — Format and send the Discord reply ────────────────────────────────
-def format_response(card: dict, query: str, comps: list[dict]) -> discord.Embed:
+def format_response(card: dict, query: str, comps: list) -> discord.Embed:
     if comps:
         prices = [c["price"] for c in comps]
-        avg    = sum(prices) / len(prices)
-        color  = discord.Color.green()
+        avg = sum(prices) / len(prices)
+        color = discord.Color.green()
     else:
-        avg   = None
+        avg = None
         color = discord.Color.orange()
 
-    # Card title line
     card_name = " ".join(filter(None, [
         card.get("year"), card.get("player"),
         card.get("brand"), card.get("set"), card.get("variation")
@@ -166,7 +147,7 @@ def format_response(card: dict, query: str, comps: list[dict]) -> discord.Embed:
 
     if avg is not None:
         embed.add_field(name="💰 Avg Sold Price", value=f"**${avg:.2f}**", inline=True)
-        embed.add_field(name="📦 Sales Found",    value=str(len(comps)),   inline=True)
+        embed.add_field(name="📦 Sales Found", value=str(len(comps)), inline=True)
 
     if comps:
         sales_lines = "\n".join(
@@ -184,7 +165,6 @@ def format_response(card: dict, query: str, comps: list[dict]) -> discord.Embed:
     return embed
 
 
-# ── Bot events ────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     print(f"✅ Asylum Bot is online as {bot.user}")
@@ -192,11 +172,9 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Ignore the bot's own messages
     if message.author.bot:
         return
 
-    # Only act in the price-check channel
     channel_match = (
         message.channel.name == PRICE_CHECK_CHANNEL
         or str(message.channel.id) == PRICE_CHECK_CHANNEL
@@ -205,7 +183,6 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Only act if there's an image attachment
     image_attachments = [
         a for a in message.attachments
         if a.content_type and a.content_type.startswith("image/")
@@ -214,7 +191,6 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Acknowledge immediately so the user knows we're working
     thinking = await message.reply("🔍 Identifying your card and pulling eBay comps… hang tight!")
 
     try:
@@ -222,9 +198,12 @@ async def on_message(message: discord.Message):
 
         # 1. Identify card
         card = await identify_card(image_url)
+        print(f"Card identified: {card}")
 
         # 2. Build query
         query = build_ebay_query(card)
+        print(f"eBay query: {repr(query)}")
+
         if not query.strip():
             await thinking.edit(content="❌ Couldn't read the card from that image. Try a clearer photo!")
             return
@@ -232,7 +211,7 @@ async def on_message(message: discord.Message):
         # 3. Get comps
         comps = await get_ebay_comps(query)
 
-        # 4. Build and send embed
+        # 4. Send embed
         embed = format_response(card, query, comps)
         await thinking.delete()
         await message.reply(embed=embed)
