@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 import os
 import json
 import re
+import random
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -17,17 +18,22 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Rotating user agents to avoid bot detection
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+]
+
 
 async def identify_card(image_urls: list) -> dict:
-    """
-    Send up to 2 card images (front + back) to GPT-4o for identification.
-    """
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    # Build content array — text prompt first, then all images
     content = [
         {
             "type": "text",
@@ -48,7 +54,6 @@ async def identify_card(image_urls: list) -> dict:
         }
     ]
 
-    # Add each image
     for url in image_urls:
         content.append({"type": "image_url", "image_url": {"url": url}})
 
@@ -102,20 +107,28 @@ async def get_ebay_comps(query: str) -> list:
     )
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        async with session.get(url, headers=headers, allow_redirects=True) as resp:
             html = await resp.text()
+
+    print(f"eBay response length: {len(html)}")
 
     soup = BeautifulSoup(html, "html.parser")
     items = soup.select(".s-item__info")
+    print(f"Items found in HTML: {len(items)}")
 
     results = []
     for item in items:
@@ -228,7 +241,6 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # Only act if there's at least one image
     image_attachments = [
         a for a in message.attachments
         if a.content_type and a.content_type.startswith("image/")
@@ -240,22 +252,18 @@ async def on_message(message: discord.Message):
     thinking = await message.reply("🔍 Identifying your card and pulling eBay comps… hang tight!")
 
     try:
-        # Collect up to 2 image URLs (front + back)
         image_urls = [a.url for a in image_attachments[:2]]
         print(f"Images received: {len(image_urls)}")
 
-        # Check if the member typed a manual search caption
         caption = message.content.strip() if message.content.strip() else None
         manual = False
 
         if caption:
-            # Use the caption directly as the eBay query
             query = re.sub(r"[\r\n\t]+", " ", caption).strip()
             card = {}
             manual = True
             print(f"Manual query from caption: {repr(query)}")
         else:
-            # Use AI to identify the card from image(s)
             card = await identify_card(image_urls)
             print(f"Card identified: {card}")
             query = build_ebay_query(card)
@@ -271,11 +279,9 @@ async def on_message(message: discord.Message):
             )
             return
 
-        # Scrape comps
         comps = await get_ebay_comps(query)
         print(f"Comps found: {len(comps)}")
 
-        # Send embed
         embed = format_response(card, query, comps, manual=manual)
         await thinking.delete()
         await message.reply(embed=embed)
