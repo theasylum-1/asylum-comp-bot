@@ -86,7 +86,6 @@ async def identify_card(image_url: str) -> dict:
     if card.get("variation"):   parts.append(card["variation"])
     if card.get("card_number"): parts.append(f"#{card['card_number']}")
     query = " ".join(parts)
-    # Strip any newlines or carriage returns
     query = query.replace("\n", " ").replace("\r", " ").strip()
     return query
 
