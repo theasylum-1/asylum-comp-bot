@@ -88,12 +88,16 @@ def build_search_query(card: dict) -> str:
 def build_links(query: str) -> dict:
     encoded = quote_plus(query)
     return {
-        "130point": f"https://130point.com/sales/?q={encoded}",
         "ebay_sold": (
             f"https://www.ebay.com/sch/i.html"
             f"?_nkw={encoded}"
             f"&LH_Complete=1"
             f"&LH_Sold=1"
+            f"&_sop=13"
+        ),
+        "ebay_active": (
+            f"https://www.ebay.com/sch/i.html"
+            f"?_nkw={encoded}"
             f"&_sop=13"
         ),
     }
@@ -136,10 +140,10 @@ def format_response(card: dict, query: str, links: dict, manual: bool = False) -
 
     # Comp links
     embed.add_field(
-        name="💰 Check Sold Comps",
+        name="💰 Check Comps",
         value=(
-            f"[🔗 130point Sold Sales]({links['130point']})\n"
-            f"[🔗 eBay Sold Listings]({links['ebay_sold']})"
+            f"[💵 eBay Sold Listings]({links['ebay_sold']})\n"
+            f"[🛒 eBay Active Listings]({links['ebay_active']})"
         ),
         inline=False
     )
