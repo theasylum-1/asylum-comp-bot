@@ -75,6 +75,7 @@ ONE_PIECE_SET_CODES = {
     "ST14": "3D2Y",
     "ST15": "Red Edward Newgate",
     "ST16": "Green Uta",
+    "OP11": "A Fist of Divine Speed",
     "EB01": "Extra Booster Memorial Collection",
     "ME01": "Premium Card Collection",
     "ME02": "Phantasmal Flames",
@@ -180,7 +181,11 @@ def build_search_query(card: dict) -> str:
     if card.get("year"):      parts.append(card["year"])
     if card.get("player"):    parts.append(card["player"])
     if card.get("brand"):     parts.append(card["brand"])
-    if card.get("set"):       parts.append(card["set"])
+    # Use full set name if available, otherwise fall back to set_code
+    if card.get("set"):
+        parts.append(card["set"])
+    elif card.get("set_code"):
+        parts.append(card["set_code"])
     if card.get("variation"): parts.append(card["variation"])
     if card.get("serial"):    parts.append(f"/{card['serial']}")
     query = " ".join(parts)
