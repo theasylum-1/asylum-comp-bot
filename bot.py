@@ -7,22 +7,119 @@ import re
 from datetime import datetime
 from urllib.parse import quote_plus
 
-# Config
-DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+# ── Config ─────────────────────────────────────────────────────────────────────
+DISCORD_TOKEN   = os.environ["DISCORD_TOKEN"]
+OPENAI_API_KEY  = os.environ["OPENAI_API_KEY"]
 JUSTTCG_API_KEY = os.environ["JUSTTCG_API_KEY"]
 PRICE_CHECK_CHANNEL = "price-check"
 
-# TCG sports that should use JustTCG
 TCG_SPORTS = {"pokemon", "one piece", "onepiece", "one-piece", "magic", "yugioh", "yu-gi-oh"}
+
+# ── Pokemon set code -> full set name ──────────────────────────────────────────
+POKEMON_SET_CODES = {
+    "PFL": "Phantasmal Flames",
+    "JTG": "Journey Together",
+    "PRE": "Prismatic Evolutions",
+    "SSP": "Surging Sparks",
+    "SCR": "Stellar Crown",
+    "SFA": "Shrouded Fable",
+    "TWM": "Twilight Masquerade",
+    "TEF": "Temporal Forces",
+    "PAF": "Paldean Fates",
+    "PAR": "Paradox Rift",
+    "MEW": "151",
+    "OBF": "Obsidian Flames",
+    "PAL": "Paldea Evolved",
+    "SVI": "Scarlet & Violet",
+    "CRZ": "Crown Zenith",
+    "SIT": "Silver Tempest",
+    "LOR": "Lost Origin",
+    "PGO": "Pokemon GO",
+    "ASR": "Astral Radiance",
+    "BRS": "Brilliant Stars",
+    "FST": "Fusion Strike",
+    "CEL": "Celebrations",
+    "EVS": "Evolving Skies",
+    "CRE": "Chilling Reign",
+    "BST": "Battle Styles",
+    "SHF": "Shining Fates",
+    "VIV": "Vivid Voltage",
+    "DAA": "Darkness Ablaze",
+    "RCL": "Rebel Clash",
+    "SSH": "Sword & Shield",
+}
+
+# ── One Piece set code -> full set name ────────────────────────────────────────
+ONE_PIECE_SET_CODES = {
+    "OP01": "Romance Dawn",
+    "OP02": "Paramount War",
+    "OP03": "Pillars of Strength",
+    "OP04": "Kingdoms of Intrigue",
+    "OP05": "Awakening of the New Era",
+    "OP06": "Wings of the Captain",
+    "OP07": "500 Years in the Future",
+    "OP08": "Two Legends",
+    "OP09": "Emperors in the New World",
+    "OP10": "Royal Blood",
+    "ST01": "Straw Hat Crew",
+    "ST02": "Worst Generation",
+    "ST03": "The Seven Warlords of the Sea",
+    "ST04": "Animal Kingdom Pirates",
+    "ST05": "Film Edition",
+    "ST06": "Absolute Justice",
+    "ST07": "Big Mom Pirates",
+    "ST08": "Monkey D. Luffy",
+    "ST09": "Yamato",
+    "ST10": "UTA",
+    "ST13": "The Three Brothers",
+    "ST14": "3D2Y",
+    "ST15": "Red Edward Newgate",
+    "ST16": "Green Uta",
+    "EB01": "Extra Booster: Memorial Collection",
+    "ME01": "Premium Card Collection",
+    "ME02": "Phantasmal Flames",
+}
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 processed_messages = set()
 
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def resolve_set_code(set_code: str, sport: str) -> str:
+    code = set_code.upper().strip()
+    if "pokemon" in sport.lower():
+        return POKEMON_SET_CODES.get(code, "")
+    elif "one piece" in sport.lower() or "onepiece" in sport.lower():
+        return ONE_PIECE_SET_CODES.get(code, "")
+    return ""
+
+
+def is_tcg_card(card: dict) -> bool:
+    return any(t in card.get("sport", "").lower() for t in TCG_SPORTS)
+
+
+def build_search_query(card: dict) -> str:
+    parts = []
+    if card.get("year"):      parts.append(card["year"])
+    if card.get("player"):    parts.append(card["player"])
+    if card.get("brand"):     parts.append(card["brand"])
+    if card.get("set"):       parts.append(card["set"])
+    if card.get("variation"): parts.append(card["variation"])
+    if card.get("serial"):    parts.append(f"/{card['serial']}")
+    return re.sub(r"[\r\n\t]+", " ", " ".join(parts)).strip()
+
+
+def build_ebay_links(query: str) -> dict:
+    encoded = quote_plus(query)
+    return {
+        "sold":   f"https://www.ebay.com/sch/i.html?_nkw={encoded}&LH_Complete=1&LH_Sold=1&_sop=13",
+        "active": f"https://www.ebay.com/sch/i.html?_nkw={encoded}&_sop=13",
+    }
+
+
+# ── Card identification ────────────────────────────────────────────────────────
 async def identify_card(image_urls: list) -> dict:
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -33,18 +130,33 @@ async def identify_card(image_urls: list) -> dict:
         {
             "type": "text",
             "text": (
-                "You are an expert trading card identifier. Carefully examine all provided card images "
-                "(there may be a front and back) and return ONLY a JSON object with no markdown or explanation.\n\n"
-                "Rules:\n"
-                "- 'player': Full name of player or character on the card\n"
-                "- 'year': The year of the card. Check the back carefully.\n"
-                "- 'brand': The card manufacturer (Topps, Bowman, Panini, Upper Deck, Pokemon, One Piece, etc)\n"
-                "- 'set': The specific set name (Brooklyn Collection, Chrome, Prizm, Base Set, Obsidian Flames, etc). No brand/year.\n"
-                "- 'variation': Any parallel (Refractor, Holo, Auto, Autograph, Rookie, Gold, Full Art, etc). Empty string if base.\n"
-                "- 'serial': Print run denominator only (e.g. '75' from '54/75'). Empty string if not numbered.\n"
-                "- 'card_number': Catalog number (e.g. 'AC-OS' or '025/198'). NOT serial number.\n"
-                "- 'sport': Use exactly one of: Baseball, Football, Basketball, Hockey, Pokemon, One Piece, Magic, YuGiOh, Other\n\n"
-                "All values single-line strings, no newlines. Empty string if unknown."
+                "You are an expert trading card identifier. Examine ALL images carefully and return ONLY a JSON object — no markdown.\n\n"
+
+                "STEP 1 — DETERMINE THE GAME by reading the copyright line and logo:\n"
+                "- POKEMON: Copyright says '© Pokémon / Nintendo / Creatures / GAME FREAK'. Has HP in top right, energy symbols.\n"
+                "- ONE PIECE: Has ONE PIECE logo. Set codes like OP01-OP10, ST01-ST16, EB01, ME01, ME02.\n"
+                "- SPORTS: Real athletes. Topps, Bowman, Panini, Upper Deck branding.\n"
+                "- MAGIC: Mana symbols, 'Magic: The Gathering' branding.\n\n"
+
+                "STEP 2 — READ THE SET CODE printed in small text at the bottom of the card (e.g. 'PFL', 'OBF', 'OP07'). "
+                "This is the MOST RELIABLE way to identify the exact set. Always read this code directly from the card.\n\n"
+
+                "STEP 3 — IDENTIFY THE VARIATION TYPE:\n"
+                "- Pokemon: Illustration Rare (IR), Special Illustration Rare (SIR), Full Art, Alt Art, Rainbow Rare, Gold Rare, Secret Rare, Holo Rare, etc.\n"
+                "- One Piece: Leader, Character, Event, Stage, Don!!, Super Rare (SR), Secret Rare (SEC), Alternate Art, Parallel, etc.\n"
+                "- Sports: Refractor, Prizm, Auto, Patch, Rookie, Gold, Numbered parallel, etc.\n\n"
+
+                "Return this exact JSON:\n"
+                "{'player': 'character or player full name',\n"
+                " 'year': 'year from copyright line at bottom',\n"
+                " 'brand': 'Pokemon / One Piece / Topps / Bowman / Panini / Upper Deck / etc',\n"
+                " 'set': 'FULL set name e.g. Phantasmal Flames or Obsidian Flames',\n"
+                " 'set_code': 'short code printed on card e.g. PFL or OP07 — read this directly from the card',\n"
+                " 'variation': 'Illustration Rare / Special Illustration Rare / Holo / Full Art / Alt Art / Refractor / Auto / etc — empty if base',\n"
+                " 'serial': 'print run denominator only e.g. 75 from 54/75 — empty if not numbered',\n"
+                " 'card_number': 'number as printed e.g. 107/094 or L-001',\n"
+                " 'sport': 'EXACTLY one of: Baseball Football Basketball Hockey Pokemon One Piece Magic YuGiOh Other'}\n\n"
+                "All values single-line strings. Empty string if unknown."
             ),
         }
     ]
@@ -54,7 +166,7 @@ async def identify_card(image_urls: list) -> dict:
 
     payload = {
         "model": "gpt-4o",
-        "max_tokens": 500,
+        "max_tokens": 600,
         "messages": [{"role": "user", "content": content}],
     }
 
@@ -74,241 +186,156 @@ async def identify_card(image_urls: list) -> dict:
         if isinstance(card[key], str):
             card[key] = card[key].replace("\n", " ").replace("\r", " ").strip()
 
+    # Auto-resolve set name from set code
+    set_code = card.get("set_code", "")
+    if set_code:
+        resolved = resolve_set_code(set_code, card.get("sport", ""))
+        if resolved:
+            print(f"Resolved set code '{set_code}' -> '{resolved}'")
+            card["set"] = resolved
+
     return card
 
 
-def is_tcg_card(card: dict) -> bool:
-    sport = card.get("sport", "").lower().strip()
-    return any(t in sport for t in TCG_SPORTS)
-
-
-def build_search_query(card: dict) -> str:
-    parts = []
-    if card.get("year"):      parts.append(card["year"])
-    if card.get("player"):    parts.append(card["player"])
-    if card.get("brand"):     parts.append(card["brand"])
-    if card.get("set"):       parts.append(card["set"])
-    if card.get("variation"): parts.append(card["variation"])
-    if card.get("serial"):    parts.append(f"/{card['serial']}")
-    query = " ".join(parts)
-    return re.sub(r"[\r\n\t]+", " ", query).strip()
-
-
-def build_sport_query(card: dict) -> str:
-    """Build a cleaner query for TCG cards — player/character + set + variation."""
-    parts = []
-    if card.get("player"):    parts.append(card["player"])
-    if card.get("set"):       parts.append(card["set"])
-    if card.get("variation"): parts.append(card["variation"])
-    if card.get("card_number"): parts.append(card["card_number"])
-    query = " ".join(parts)
-    return re.sub(r"[\r\n\t]+", " ", query).strip()
-
-
+# ── JustTCG pricing ────────────────────────────────────────────────────────────
 async def get_justtcg_price(card: dict) -> dict | None:
-    """
-    Query JustTCG API for Pokémon or One Piece card prices.
-    Returns dict with price info or None if not found.
-    """
     sport = card.get("sport", "").lower()
-
-    # Map sport to JustTCG game slug
     game_map = {
-        "pokemon": "pokemon",
+        "pokemon":   "pokemon",
         "one piece": "one-piece-card-game",
-        "onepiece": "one-piece-card-game",
+        "onepiece":  "one-piece-card-game",
         "one-piece": "one-piece-card-game",
-        "magic": "magic",
-        "yugioh": "yugioh",
-        "yu-gi-oh": "yugioh",
+        "magic":     "magic",
+        "yugioh":    "yugioh",
     }
-
-    game = None
-    for key, value in game_map.items():
-        if key in sport:
-            game = value
-            break
-
+    game = next((v for k, v in game_map.items() if k in sport), None)
     if not game:
         return None
 
-    # Build search query — character name + set is most accurate
-    search_query = build_sport_query(card)
-    if not search_query:
-        search_query = card.get("player", "")
+    headers = {"Authorization": f"Bearer {JUSTTCG_API_KEY}", "Content-Type": "application/json"}
+    player      = card.get("player", "")
+    set_name    = card.get("set", "")
+    card_number = card.get("card_number", "")
 
-    print(f"JustTCG search: game={game}, q={search_query}")
+    searches = []
+    if player and card_number: searches.append(f"{player} {card_number}")
+    if player and set_name:    searches.append(f"{player} {set_name}")
+    if player:                 searches.append(player)
 
-    headers = {
-        "Authorization": f"Bearer {JUSTTCG_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    for q in searches:
+        print(f"JustTCG: game={game}, q={q}")
+        result = await _justtcg_fetch(headers, game, q, card_number)
+        if result:
+            return result
+    return None
 
-    params = {
-        "q": search_query,
-        "game": game,
-        "limit": 5,
-    }
 
+async def _justtcg_fetch(headers: dict, game: str, query: str, card_number: str = "") -> dict | None:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 "https://api.justtcg.com/v2/cards",
                 headers=headers,
-                params=params,
+                params={"q": query, "game": game, "limit": 10},
             ) as resp:
                 status = resp.status
-                data = await resp.json()
+                data   = await resp.json()
 
-        print(f"JustTCG status: {status}")
-        print(f"JustTCG response: {json.dumps(data)[:500]}")
-
+        print(f"JustTCG status={status}, results={len(data.get('data', []))}")
         if status != 200 or not data.get("data"):
             return None
 
-        # Find best matching card
         cards = data["data"]
-        if not cards:
-            return None
+        best  = None
 
-        # Try to find exact match by card number if we have it
-        card_num = card.get("card_number", "").lower()
-        best = None
-        if card_num:
+        if card_number:
+            clean = card_number.replace(" ", "").lower()
             for c in cards:
-                if card_num in str(c.get("number", "")).lower():
+                if clean in str(c.get("number", "")).replace(" ", "").lower():
                     best = c
+                    print(f"Matched by number: {c.get('name')} {c.get('number')}")
                     break
 
         if not best:
             best = cards[0]
+            print(f"Using first result: {best.get('name')} {best.get('number')}")
 
-        # Extract pricing from variants
         variants = best.get("variants", [])
         if not variants:
             return None
 
-        # Get the first variant's prices (usually the base/normal version)
-        variant = variants[0]
-        prices = variant.get("prices", {})
-
+        prices = variants[0].get("prices", {})
         return {
-            "name": best.get("name", ""),
-            "set": best.get("set_name", ""),
-            "number": best.get("number", ""),
-            "image": best.get("image_url", ""),
-            "market_price": prices.get("market"),
-            "low_price": prices.get("low"),
-            "mid_price": prices.get("mid"),
-            "high_price": prices.get("high"),
+            "name":          best.get("name", ""),
+            "set":           best.get("set_name", ""),
+            "number":        best.get("number", ""),
+            "image":         best.get("image_url", ""),
+            "market_price":  prices.get("market"),
+            "low_price":     prices.get("low"),
+            "high_price":    prices.get("high"),
             "tcgplayer_url": best.get("tcgplayer_url", ""),
         }
-
     except Exception as e:
         print(f"JustTCG error: {e}")
         return None
 
 
-def build_ebay_links(query: str) -> dict:
-    encoded = quote_plus(query)
-    return {
-        "ebay_sold": (
-            f"https://www.ebay.com/sch/i.html"
-            f"?_nkw={encoded}&LH_Complete=1&LH_Sold=1&_sop=13"
-        ),
-        "ebay_active": (
-            f"https://www.ebay.com/sch/i.html"
-            f"?_nkw={encoded}&_sop=13"
-        ),
-    }
+# ── Embed builders ─────────────────────────────────────────────────────────────
+def format_tcg_embed(card: dict, query: str, tcg: dict | None, links: dict, manual: bool = False) -> discord.Embed:
+    name = (query if manual else card.get("player", "")) or query
+    embed = discord.Embed(title=f"🃏 {name}", color=discord.Color.gold(), timestamp=datetime.utcnow())
+    embed.add_field(name="🔍 Search", value=f"`{query}`" + (" *(manual)*" if manual else ""), inline=False)
 
-
-def format_tcg_response(card: dict, query: str, tcg_data: dict | None, ebay_links: dict, manual: bool = False) -> discord.Embed:
-    card_name = card.get("player", "") or query
-    if manual:
-        card_name = query
-
-    embed = discord.Embed(
-        title=f"🃏 {card_name}",
-        color=discord.Color.gold(),
-        timestamp=datetime.utcnow(),
-    )
-
-    embed.add_field(
-        name="🔍 Search Used",
-        value=f"`{query}`" + (" *(manual)*" if manual else ""),
-        inline=False
-    )
-
-    # Card details
-    if not manual and card:
+    if not manual:
         details = []
         if card.get("sport"):       details.append(f"**Game:** {card['sport']}")
         if card.get("set"):         details.append(f"**Set:** {card['set']}")
+        if card.get("set_code"):    details.append(f"**Set Code:** {card['set_code']}")
         if card.get("variation"):   details.append(f"**Variant:** {card['variation']}")
         if card.get("card_number"): details.append(f"**Card #:** {card['card_number']}")
+        if card.get("year"):        details.append(f"**Year:** {card['year']}")
         if details:
             embed.add_field(name="📋 Card Details", value="\n".join(details), inline=False)
 
-    # TCGPlayer prices from JustTCG
-    if tcg_data:
-        price_lines = []
-        if tcg_data.get("low_price"):    price_lines.append(f"**Low:** ${tcg_data['low_price']:.2f}")
-        if tcg_data.get("market_price"): price_lines.append(f"**Market:** ${tcg_data['market_price']:.2f}")
-        if tcg_data.get("high_price"):   price_lines.append(f"**High:** ${tcg_data['high_price']:.2f}")
-
-        if price_lines:
-            value = "\n".join(price_lines)
-            if tcg_data.get("tcgplayer_url"):
-                value += f"\n[View on TCGPlayer]({tcg_data['tcgplayer_url']})"
-            embed.add_field(name="💰 TCGPlayer Prices", value=value, inline=False)
-
-        if tcg_data.get("image"):
-            embed.set_thumbnail(url=tcg_data["image"])
+    if tcg:
+        lines = []
+        if tcg.get("low_price"):    lines.append(f"**Low:** ${tcg['low_price']:.2f}")
+        if tcg.get("market_price"): lines.append(f"**Market:** ${tcg['market_price']:.2f}")
+        if tcg.get("high_price"):   lines.append(f"**High:** ${tcg['high_price']:.2f}")
+        val = "\n".join(lines) if lines else "No price data available"
+        if tcg.get("tcgplayer_url"):
+            val += f"\n[View on TCGPlayer]({tcg['tcgplayer_url']})"
+        embed.add_field(name="💰 TCGPlayer Prices", value=val, inline=False)
+        if tcg.get("image"):
+            embed.set_thumbnail(url=tcg["image"])
     else:
         embed.add_field(
             name="💰 TCGPlayer Prices",
-            value="Could not find this card in TCGPlayer database.\nTry adding a caption with the exact card name.",
+            value="Card not found in database.\nTry adding a caption with the exact card name and set.",
             inline=False
         )
 
-    # eBay links as backup
     embed.add_field(
         name="🔗 eBay Comps",
-        value=(
-            f"[💵 Sold Listings]({ebay_links['ebay_sold']})  |  "
-            f"[🛒 Active Listings]({ebay_links['ebay_active']})"
-        ),
+        value=f"[💵 Sold]({links['sold']})  |  [🛒 Active]({links['active']})",
         inline=False
     )
-
-    embed.set_footer(text="The Asylum • Card Comp Bot | Prices from TCGPlayer via JustTCG")
+    embed.set_footer(text="The Asylum • Card Comp Bot | TCGPlayer prices via JustTCG")
     return embed
 
 
-def format_sports_response(card: dict, query: str, ebay_links: dict, manual: bool = False) -> discord.Embed:
-    card_name = " ".join(filter(None, [
-        card.get("year"), card.get("player"),
-        card.get("brand"), card.get("set"), card.get("variation"),
+def format_sports_embed(card: dict, query: str, links: dict, manual: bool = False) -> discord.Embed:
+    name = " ".join(filter(None, [
+        card.get("year"), card.get("player"), card.get("brand"),
+        card.get("set"), card.get("variation"),
         f"/{card['serial']}" if card.get("serial") else ""
     ])) or query
+    if manual: name = query
 
-    if manual:
-        card_name = query
+    embed = discord.Embed(title=f"🃏 {name}", color=discord.Color.blue(), timestamp=datetime.utcnow())
+    embed.add_field(name="🔍 Search", value=f"`{query}`" + (" *(manual)*" if manual else ""), inline=False)
 
-    embed = discord.Embed(
-        title=f"🃏 {card_name}",
-        color=discord.Color.blue(),
-        timestamp=datetime.utcnow(),
-    )
-
-    embed.add_field(
-        name="🔍 Search Used",
-        value=f"`{query}`" + (" *(manual)*" if manual else ""),
-        inline=False
-    )
-
-    if not manual and card:
+    if not manual:
         details = []
         if card.get("sport"):       details.append(f"**Sport:** {card['sport']}")
         if card.get("brand"):       details.append(f"**Brand:** {card['brand']}")
@@ -321,18 +348,15 @@ def format_sports_response(card: dict, query: str, ebay_links: dict, manual: boo
             embed.add_field(name="📋 Card Details", value="\n".join(details), inline=False)
 
     embed.add_field(
-        name="💰 Check Comps",
-        value=(
-            f"[💵 eBay Sold Listings]({ebay_links['ebay_sold']})\n"
-            f"[🛒 eBay Active Listings]({ebay_links['ebay_active']})"
-        ),
+        name="💰 eBay Comps",
+        value=f"[💵 Sold Listings]({links['sold']})\n[🛒 Active Listings]({links['active']})",
         inline=False
     )
-
     embed.set_footer(text="The Asylum • Card Comp Bot")
     return embed
 
 
+# ── Bot events ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     print(f"✅ Asylum Bot is online as {bot.user}")
@@ -347,9 +371,8 @@ async def on_message(message: discord.Message):
         return
     processed_messages.add(message.id)
     if len(processed_messages) > 1000:
-        oldest = list(processed_messages)[:500]
-        for msg_id in oldest:
-            processed_messages.discard(msg_id)
+        for old in list(processed_messages)[:500]:
+            processed_messages.discard(old)
 
     channel_match = (
         message.channel.name == PRICE_CHECK_CHANNEL
@@ -359,54 +382,40 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    image_attachments = [
-        a for a in message.attachments
-        if a.content_type and a.content_type.startswith("image/")
-    ]
-    if not image_attachments:
+    images = [a for a in message.attachments if a.content_type and a.content_type.startswith("image/")]
+    if not images:
         await bot.process_commands(message)
         return
 
     thinking = await message.reply("🔍 Identifying your card… hang tight!")
 
     try:
-        image_urls = [a.url for a in image_attachments[:2]]
-        print(f"Images received: {len(image_urls)}")
+        image_urls = [a.url for a in images[:2]]
+        caption    = message.content.strip() or None
+        manual     = bool(caption)
 
-        caption = message.content.strip() if message.content.strip() else None
-        manual = False
-
-        if caption:
+        if manual:
             query = re.sub(r"[\r\n\t]+", " ", caption).strip()
-            card = {}
-            manual = True
+            card  = {}
             print(f"Manual query: {repr(query)}")
         else:
-            card = await identify_card(image_urls)
-            print(f"Card identified: {card}")
+            card  = await identify_card(image_urls)
             query = build_search_query(card)
+            print(f"Card identified: {card}")
             print(f"Search query: {repr(query)}")
 
         if not query.strip():
-            await thinking.edit(
-                content=(
-                    "❌ Couldn't identify the card. Try posting front **and back** together, "
-                    "or add a caption like:\n`Charizard ex Obsidian Flames Full Art`"
-                )
-            )
+            await thinking.edit(content="❌ Couldn't identify the card. Try posting front **and back** together, or add a caption.")
             return
 
-        ebay_links = build_ebay_links(query)
+        links = build_ebay_links(query)
 
-        # Route to TCG or sports handler
         if not manual and is_tcg_card(card):
-            print(f"Routing to TCG handler for sport: {card.get('sport')}")
-            await thinking.edit(content="🔍 Found the card! Pulling TCGPlayer prices… hang tight!")
+            await thinking.edit(content="🔍 Found the card! Pulling TCGPlayer prices…")
             tcg_data = await get_justtcg_price(card)
-            embed = format_tcg_response(card, query, tcg_data, ebay_links, manual=manual)
+            embed    = format_tcg_embed(card, query, tcg_data, links)
         else:
-            print(f"Routing to sports handler")
-            embed = format_sports_response(card, query, ebay_links, manual=manual)
+            embed = format_sports_embed(card, query, links, manual=manual)
 
         await thinking.delete()
         await message.reply(embed=embed)
