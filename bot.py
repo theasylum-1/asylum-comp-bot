@@ -16,7 +16,6 @@ PRICE_CHECK_CHANNEL = "price-check"
 
 TCG_SPORTS = {"pokemon", "one piece", "onepiece", "one-piece", "magic", "yugioh", "yu-gi-oh"}
 
-# ── Pokemon set code -> full name ───────────────────────────────────────────────
 POKEMON_SET_CODES = {
     "PFL": "Phantasmal Flames",
     "JTG": "Journey Together",
@@ -50,7 +49,6 @@ POKEMON_SET_CODES = {
     "SSH": "Sword & Shield",
 }
 
-# ── One Piece set code -> full name ─────────────────────────────────────────────
 ONE_PIECE_SET_CODES = {
     "OP01": "Romance Dawn",
     "OP02": "Paramount War",
@@ -108,33 +106,28 @@ async def identify_card(image_urls: list) -> dict:
             "type": "text",
             "text": (
                 "You are an expert trading card identifier. Examine ALL provided images carefully and return ONLY a JSON object with no markdown.\n\n"
-
                 "STEP 1 — CHECK IF THE CARD IS GRADED:\n"
-                "Look for a plastic slab with a label at the top or bottom. Grading companies: PSA, BGS, SGC, CGC.\n"
-                "If graded, READ THE LABEL CAREFULLY — it contains the most accurate card info.\n\n"
-
-                "STEP 2 — IDENTIFY THE GAME by looking at these clues:\n"
-                "- POKEMON: Has 'HP' in top right, energy symbols, 'Pokémon / Nintendo / Creatures / GAME FREAK' in copyright. "
-                "Set codes at bottom left like PFL, OBF, SVI, PAR, MEW, TWM, SSP, SCR, JTG, PRE etc.\n"
-                "- ONE PIECE: Has ONE PIECE logo, pirate/anime characters. Set codes like OP01-OP11, ST01-ST16, EB01, ME01, ME02.\n"
+                "Look for a plastic slab with a label. Grading companies: PSA, BGS, SGC, CGC.\n"
+                "If graded, READ THE LABEL CAREFULLY.\n\n"
+                "STEP 2 — IDENTIFY THE GAME:\n"
+                "- POKEMON: Has 'HP' in top right, energy symbols, Pokémon copyright. Set codes like PFL, OBF, SVI etc.\n"
+                "- ONE PIECE: Has ONE PIECE logo, pirate characters. Set codes like OP01-OP11, ST01-ST16, EB01, ME01, ME02.\n"
                 "- SPORTS: Real athletes, brands like Topps/Bowman/Panini/Upper Deck.\n"
-                "- MAGIC: Fantasy art, mana symbols, Magic: The Gathering branding.\n\n"
-
-                "STEP 3 — READ THE SET CODE from the bottom left corner of the card (e.g. 'PFL', 'OBF', 'OP07'). This is critical.\n\n"
-
+                "- MAGIC: Fantasy art, mana symbols.\n\n"
+                "STEP 3 — READ THE SET CODE from the bottom left corner.\n\n"
                 "Return this exact JSON:\n"
                 "- 'player': Character or player full name\n"
                 "- 'year': Year of the card\n"
                 "- 'brand': Pokemon, One Piece, Topps, Bowman, Panini, Upper Deck, etc\n"
                 "- 'set': Full set name if visible, otherwise leave empty\n"
-                "- 'set_code': The SHORT code printed on the card bottom left (e.g. 'PFL', 'OP07'). VERY IMPORTANT.\n"
-                "- 'variation': Holo, Full Art, Refractor, Auto, Autograph, Gold Refractor, etc. Empty if base.\n"
+                "- 'set_code': SHORT code printed on card bottom left (e.g. 'PFL', 'OP07')\n"
+                "- 'variation': Holo, Full Art, Refractor, Auto, Gold Refractor, etc. Empty if base.\n"
                 "- 'serial': Print run denominator only (e.g. '75' from '54/75'). Empty if not numbered.\n"
-                "- 'card_number': Card number as printed (e.g. '#ACRM' or '107/094')\n"
+                "- 'card_number': Card number as printed\n"
                 "- 'sport': EXACTLY one of: Baseball, Football, Basketball, Hockey, Pokemon, One Piece, Magic, YuGiOh, Other\n"
-                "- 'graded': 'true' if card is in a grading slab, 'false' if raw\n"
-                "- 'grading_company': PSA, BGS, SGC, CGC, or empty string if not graded\n"
-                "- 'grade': The numeric or letter grade (e.g. '10', '9.5', '9'). Empty if not graded.\n\n"
+                "- 'graded': 'true' if in a grading slab, 'false' if raw\n"
+                "- 'grading_company': PSA, BGS, SGC, CGC, or empty string\n"
+                "- 'grade': Numeric grade (e.g. '10', '9.5'). Empty if not graded.\n\n"
                 "All values single-line strings, no newlines. Empty string if unknown."
             ),
         }
@@ -198,10 +191,9 @@ def build_search_query(card: dict) -> str:
     return re.sub(r"[\r\n\t]+", " ", query).strip()
 
 
-# ── eBay Finding API ───────────────────────────────────────────────────────────
 async def get_ebay_comps(query: str) -> list:
-    """Pull real eBay sold comps using the Finding API."""
     if not EBAY_APP_ID:
+        print("No eBay App ID configured")
         return []
 
     params = {
@@ -224,14 +216,18 @@ async def get_ebay_comps(query: str) -> list:
             async with session.get(url, params=params) as resp:
                 data = await resp.json(content_type=None)
 
-        print(f"eBay raw response: {json.dumps(data)[:500]}")
-        items = (
-            data["findCompletedItemsResponse"][0]
-            ["searchResult"][0]
-            .get("item", [])
-        )
-        )
+        print(f"eBay raw response: {json.dumps(data)[:600]}")
 
+        response = data.get("findCompletedItemsResponse", [{}])[0]
+        ack = response.get("ack", [""])[0]
+        print(f"eBay ack: {ack}")
+
+        if ack != "Success":
+            error = response.get("errorMessage", [{}])[0].get("error", [{}])[0].get("message", ["Unknown"])[0]
+            print(f"eBay error message: {error}")
+            return []
+
+        items = response.get("searchResult", [{}])[0].get("item", [])
         results = []
         for item in items[:5]:
             try:
@@ -250,7 +246,9 @@ async def get_ebay_comps(query: str) -> list:
         return results
 
     except Exception as e:
-        print(f"eBay error: {e}")
+        print(f"eBay exception: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -262,7 +260,6 @@ def build_ebay_links(query: str) -> dict:
     }
 
 
-# ── JustTCG ────────────────────────────────────────────────────────────────────
 async def _justtcg_search(game: str, query: str, card_number: str = "", number_filter: str = "") -> dict | None:
     headers = {
         "x-api-key": JUSTTCG_API_KEY,
@@ -382,7 +379,6 @@ async def get_justtcg_price(card: dict) -> dict | None:
     return None
 
 
-# ── Embed builders ─────────────────────────────────────────────────────────────
 def format_tcg_response(card: dict, query: str, tcg_data: dict | None, ebay_links: dict, manual: bool = False) -> discord.Embed:
     card_name = card.get("player", "") or query
     if manual:
@@ -421,7 +417,6 @@ def format_tcg_response(card: dict, query: str, tcg_data: dict | None, ebay_link
         if tcg_data.get("market_price"): price_lines.append(f"**Market:** ${tcg_data['market_price']:.2f}")
         if tcg_data.get("high_price"):   price_lines.append(f"**High:** ${tcg_data['high_price']:.2f}")
         if tcg_data.get("rarity"):       price_lines.append(f"**Rarity:** {tcg_data['rarity']}")
-
         if price_lines:
             value = "\n".join(price_lines)
             if tcg_data.get("tcgplayer_url"):
@@ -486,7 +481,6 @@ def format_sports_response(card: dict, query: str, comps: list, ebay_links: dict
         if details:
             embed.add_field(name="📋 Card Details", value="\n".join(details), inline=False)
 
-    # Inline eBay comps
     if comps:
         prices = [c["price"] for c in comps]
         avg = sum(prices) / len(prices)
@@ -510,11 +504,10 @@ def format_sports_response(card: dict, query: str, comps: list, ebay_links: dict
     return embed
 
 
-# ── Bot events ─────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
     print(f"✅ Asylum Bot is online as {bot.user}")
-    print(f"eBay API: {'✅ Connected' if EBAY_APP_ID else '❌ Not configured'}")
+    print(f"eBay API: {'✅ Connected - ' + EBAY_APP_ID[:20] if EBAY_APP_ID else '❌ Not configured'}")
 
 
 @bot.event
@@ -578,12 +571,11 @@ async def on_message(message: discord.Message):
         ebay_links = build_ebay_links(query)
 
         if not manual and is_tcg_card(card):
-            print(f"TCG card detected: {card.get('sport')}")
+            print(f"TCG card: {card.get('sport')}")
             await thinking.edit(content="🔍 Found it! Pulling TCGPlayer prices… hang tight!")
             tcg_data = await get_justtcg_price(card)
             embed = format_tcg_response(card, query, tcg_data, ebay_links)
         else:
-            # Sports card — pull real eBay comps
             await thinking.edit(content="🔍 Found it! Pulling eBay sold comps… hang tight!")
             comps = await get_ebay_comps(query)
             embed = format_sports_response(card, query, comps, ebay_links, manual=manual)
