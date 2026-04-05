@@ -224,10 +224,12 @@ async def get_ebay_comps(query: str) -> list:
             async with session.get(url, params=params) as resp:
                 data = await resp.json(content_type=None)
 
+        print(f"eBay raw response: {json.dumps(data)[:500]}")
         items = (
             data["findCompletedItemsResponse"][0]
             ["searchResult"][0]
             .get("item", [])
+        )
         )
 
         results = []
