@@ -4,6 +4,7 @@ import aiohttp
 import os
 import json
 import re
+import base64
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -12,6 +13,7 @@ DISCORD_TOKEN    = os.environ["DISCORD_TOKEN"]
 OPENAI_API_KEY   = os.environ["OPENAI_API_KEY"]
 JUSTTCG_API_KEY  = os.environ["JUSTTCG_API_KEY"]
 EBAY_APP_ID      = os.environ.get("EBAY_APP_ID", "").strip()
+EBAY_CERT_ID     = os.environ.get("EBAY_CERT_ID", "").strip()
 PRICE_CHECK_CHANNEL = "price-check"
 
 TCG_SPORTS = {"pokemon", "one piece", "onepiece", "one-piece", "magic", "yugioh", "yu-gi-oh"}
@@ -85,6 +87,118 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 processed_messages = set()
 
+# ── eBay OAuth token cache ─────────────────────────────────────────────────────
+_ebay_token = None
+_ebay_token_expiry = 0
+
+
+async def get_ebay_token() -> str | None:
+    """Fetch a client-credentials OAuth token from eBay (cached until expiry)."""
+    global _ebay_token, _ebay_token_expiry
+
+    if _ebay_token and datetime.utcnow().timestamp() < _ebay_token_expiry - 60:
+        return _ebay_token
+
+    if not EBAY_APP_ID or not EBAY_CERT_ID:
+        print("eBay credentials not configured")
+        return None
+
+    credentials = base64.b64encode(f"{EBAY_APP_ID}:{EBAY_CERT_ID}".encode()).decode()
+
+    headers = {
+        "Authorization": f"Basic {credentials}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    payload = "grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.ebay.com/identity/v1/oauth2/token",
+                headers=headers,
+                data=payload,
+            ) as resp:
+                data = await resp.json()
+
+        if "access_token" not in data:
+            print(f"eBay token error: {data}")
+            return None
+
+        _ebay_token = data["access_token"]
+        _ebay_token_expiry = datetime.utcnow().timestamp() + data.get("expires_in", 7200)
+        print("eBay OAuth token obtained successfully")
+        return _ebay_token
+
+    except Exception as e:
+        print(f"eBay token exception: {e}")
+        return None
+
+
+async def get_ebay_comps(query: str) -> list:
+    """Search eBay sold listings via the Browse API."""
+    token = await get_ebay_token()
+    if not token:
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        "Content-Type": "application/json",
+    }
+
+    params = {
+        "q": query,
+        "filter": "buyingOptions:{FIXED_PRICE},conditions:{USED|LIKE_NEW|VERY_GOOD|GOOD|ACCEPTABLE},soldItemsOnly:true",
+        "sort": "endingSoonest",
+        "limit": "5",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.ebay.com/buy/browse/v1/item_summary/search",
+                headers=headers,
+                params=params,
+            ) as resp:
+                status = resp.status
+                data = await resp.json(content_type=None)
+
+        print(f"eBay Browse API status: {status}")
+        print(f"eBay Browse API response snippet: {json.dumps(data)[:400]}")
+
+        if status != 200:
+            print(f"eBay error: {data.get('errors', data)}")
+            return []
+
+        items = data.get("itemSummaries", [])
+        results = []
+        for item in items[:5]:
+            try:
+                price_info = item.get("price", {})
+                price = float(price_info.get("value", 0))
+                if price == 0:
+                    continue
+                last_sold = item.get("itemEndDate", item.get("itemCreationDate", ""))[:10]
+                results.append({
+                    "title": item.get("title", "")[:60],
+                    "price": price,
+                    "date": last_sold,
+                    "url": item.get("itemWebUrl", ""),
+                })
+            except (KeyError, ValueError):
+                continue
+
+        print(f"eBay comps found: {len(results)}")
+        return results
+
+    except Exception as e:
+        print(f"eBay Browse API exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def resolve_set_from_code(set_code: str, sport: str) -> str:
     code = set_code.upper().strip()
@@ -189,67 +303,6 @@ def build_search_query(card: dict) -> str:
         parts.append(f"{card['grading_company']} {card['grade']}")
     query = " ".join(parts)
     return re.sub(r"[\r\n\t]+", " ", query).strip()
-
-
-async def get_ebay_comps(query: str) -> list:
-    if not EBAY_APP_ID:
-        print("No eBay App ID configured")
-        return []
-
-    params = {
-        "OPERATION-NAME": "findCompletedItems",
-        "SERVICE-VERSION": "1.0.0",
-        "SECURITY-APPNAME": EBAY_APP_ID,
-        "RESPONSE-DATA-FORMAT": "JSON",
-        "REST-PAYLOAD": "",
-        "keywords": query,
-        "itemFilter(0).name": "SoldItemsOnly",
-        "itemFilter(0).value": "true",
-        "sortOrder": "EndTimeSoonest",
-        "paginationInput.entriesPerPage": "5",
-    }
-
-    url = "https://svcs.ebay.com/services/search/FindingService/v1"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                data = await resp.json(content_type=None)
-
-        print(f"eBay raw response: {json.dumps(data)[:600]}")
-
-        response = data.get("findCompletedItemsResponse", [{}])[0]
-        ack = response.get("ack", [""])[0]
-        print(f"eBay ack: {ack}")
-
-        if ack != "Success":
-            error = response.get("errorMessage", [{}])[0].get("error", [{}])[0].get("message", ["Unknown"])[0]
-            print(f"eBay error message: {error}")
-            return []
-
-        items = response.get("searchResult", [{}])[0].get("item", [])
-        results = []
-        for item in items[:5]:
-            try:
-                price = float(item["sellingStatus"][0]["currentPrice"][0]["__value__"])
-                end_time = item["listingInfo"][0]["endTime"][0][:10]
-                results.append({
-                    "title": item["title"][0][:60],
-                    "price": price,
-                    "date": end_time,
-                    "url": item["viewItemURL"][0],
-                })
-            except (KeyError, IndexError, ValueError):
-                continue
-
-        print(f"eBay comps found: {len(results)}")
-        return results
-
-    except Exception as e:
-        print(f"eBay exception: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
 
 
 def build_ebay_links(query: str) -> dict:
@@ -379,6 +432,8 @@ async def get_justtcg_price(card: dict) -> dict | None:
     return None
 
 
+# ── Embed formatters ───────────────────────────────────────────────────────────
+
 def format_tcg_response(card: dict, query: str, tcg_data: dict | None, ebay_links: dict, manual: bool = False) -> discord.Embed:
     card_name = card.get("player", "") or query
     if manual:
@@ -494,8 +549,9 @@ def format_sports_response(card: dict, query: str, comps: list, ebay_links: dict
         embed.add_field(
             name="💰 eBay Comps",
             value=(
-                f"[💵 Sold Listings]({ebay_links['ebay_sold']})\n"
-                f"[🛒 Active Listings]({ebay_links['ebay_active']})"
+                f"No sold listings found via API.\n"
+                f"[💵 Search Sold Listings]({ebay_links['ebay_sold']})\n"
+                f"[🛒 Search Active Listings]({ebay_links['ebay_active']})"
             ),
             inline=False
         )
@@ -504,10 +560,13 @@ def format_sports_response(card: dict, query: str, comps: list, ebay_links: dict
     return embed
 
 
+# ── Bot events ─────────────────────────────────────────────────────────────────
+
 @bot.event
 async def on_ready():
     print(f"✅ Asylum Bot is online as {bot.user}")
-    print(f"eBay API: {'✅ Connected - ' + EBAY_APP_ID[:20] if EBAY_APP_ID else '❌ Not configured'}")
+    print(f"eBay API: {'✅ App ID configured - ' + EBAY_APP_ID[:20] if EBAY_APP_ID else '❌ Not configured'}")
+    print(f"eBay Cert: {'✅ Cert ID configured' if EBAY_CERT_ID else '❌ Not configured'}")
 
 
 @bot.event
