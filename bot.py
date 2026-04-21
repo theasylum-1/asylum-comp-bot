@@ -544,6 +544,10 @@ def format_sports_response(card: dict, query: str, comps: list, ebay_links: dict
         sales_lines = "\n".join(
             f"[${c['price']:.2f} — {c['date']}]({c['url']})" for c in comps
         )
+        sales_lines += (
+            f"\n\n[💵 See All Sold]({ebay_links['ebay_sold']})  |  "
+            f"[🛒 Active Listings]({ebay_links['ebay_active']})"
+        )
         embed.add_field(name="🧾 Recent eBay Sales", value=sales_lines, inline=False)
     else:
         embed.add_field(
