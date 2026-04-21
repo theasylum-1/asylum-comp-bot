@@ -219,40 +219,67 @@ async def identify_card(image_urls: list) -> dict:
         {
             "type": "text",
             "text": (
-                "You are an expert trading card identifier. Examine ALL provided images carefully and return ONLY a JSON object with no markdown.\n\n"
-                "STEP 1 — CHECK IF THE CARD IS GRADED:\n"
-                "Look for a plastic slab with a label. Grading companies: PSA, BGS, SGC, CGC.\n"
-                "If graded, READ THE LABEL CAREFULLY.\n\n"
-                "STEP 2 — IDENTIFY THE GAME:\n"
-                "- POKEMON: Has 'HP' in top right, energy symbols, Pokémon copyright. Set codes like PFL, OBF, SVI etc.\n"
-                "- ONE PIECE: Has ONE PIECE logo, pirate characters. Set codes like OP01-OP11, ST01-ST16, EB01, ME01, ME02.\n"
-                "- SPORTS: Real athletes, brands like Topps/Bowman/Panini/Upper Deck.\n"
-                "- MAGIC: Fantasy art, mana symbols.\n\n"
-                "STEP 3 — READ THE SET CODE from the bottom left corner.\n\n"
-                "Return this exact JSON:\n"
-                "- 'player': Character or player full name\n"
-                "- 'year': Year of the card\n"
-                "- 'brand': Pokemon, One Piece, Topps, Bowman, Panini, Upper Deck, etc\n"
-                "- 'set': Full set name if visible, otherwise leave empty\n"
-                "- 'set_code': SHORT code printed on card bottom left (e.g. 'PFL', 'OP07')\n"
-                "- 'variation': Holo, Full Art, Refractor, Auto, Gold Refractor, etc. Empty if base.\n"
-                "- 'serial': Print run denominator only (e.g. '75' from '54/75'). Empty if not numbered.\n"
-                "- 'card_number': Card number as printed\n"
-                "- 'sport': EXACTLY one of: Baseball, Football, Basketball, Hockey, Pokemon, One Piece, Magic, YuGiOh, Other\n"
-                "- 'graded': 'true' if in a grading slab, 'false' if raw\n"
-                "- 'grading_company': PSA, BGS, SGC, CGC, or empty string\n"
-                "- 'grade': Numeric grade (e.g. '10', '9.5'). Empty if not graded.\n\n"
-                "All values single-line strings, no newlines. Empty string if unknown."
+                "You are a precise trading card OCR system. Your job is to READ text directly from the card image — do NOT guess or infer. "
+                "Return ONLY a valid JSON object with no markdown, no explanation.\n\n"
+
+                "STEP 1 — IS THE CARD IN A GRADED SLAB?\n"
+                "Look for a hard plastic case with a printed label (PSA, BGS, SGC, CGC). "
+                "If graded, read ALL text from the slab label directly — name, set, card number, grade.\n\n"
+
+                "STEP 2 — IDENTIFY THE GAME by visual cues:\n"
+                "- POKEMON: 'HP' top-right, energy symbols, bottom copyright '© Nintendo/Creatures/GAMEFREAK'\n"
+                "- ONE PIECE: ONE PIECE logo top-left, card type (Leader/Character/Event/Stage) on left edge\n"
+                "- SPORTS CARD: Photo of real athlete, brand logo (Topps, Bowman, Panini, Upper Deck, Donruss, Prizm, Select)\n"
+                "- MAGIC: Mana cost symbols top-right, 'Illustrated by' credit at bottom\n\n"
+
+                "STEP 3 — READ THE CARD NUMBER (critical — read character by character):\n"
+                "- Pokemon: bottom-right corner, format like '025/091' or '201/165' or 'SWSH001'\n"
+                "- One Piece: bottom-left, format like 'OP07-001' — the prefix IS the set code\n"
+                "- Sports: usually bottom of card or back, may say '#123' or 'Card 123 of 500'\n"
+                "Do NOT guess this number. If you cannot read it clearly, return empty string.\n\n"
+
+                "STEP 4 — READ THE SET CODE (bottom-left corner for Pokemon, embedded in card number for One Piece):\n"
+                "For Pokemon, look for 2-3 letter codes like: SSH, BST, CRE, EVS, CEL, FST, BRS, ASR, PGO, LOR, SIT, CRZ, PAL, SVI, OBF, MEW, PAR, PAF, TEF, TWM, SFA, SCR, SSP, PRE, JTG, PFL\n"
+                "Read each character individually — do not confuse O/0, I/1, B/8, S/5.\n\n"
+
+                "STEP 5 — IDENTIFY THE VARIANT precisely:\n"
+                "- Pokemon variants: Base, Holo Rare, Reverse Holo, Full Art, Ultra Rare, Secret Rare, Rainbow Rare, Gold Rare, "
+                "Illustration Rare, Special Illustration Rare, Hyper Rare, Trainer Gallery, Shiny, Promo\n"
+                "  Look for: holographic foil pattern on artwork (Full Art/Illustration Rare), rainbow shimmer (Rainbow/Hyper Rare), "
+                "  gold card border (Gold Rare), textured artwork (Special Illustration Rare)\n"
+                "- Sports variants: Base, Holo, Refractor, Chrome, Prizm, Auto (signed), Relic/Patch, "
+                "  Gold Refractor, Color Match Refractor, Superfractor — read any foil/color indicators\n"
+                "- If it is a numbered card, read the serial number as 'X/Y' and return only the denominator Y in 'serial'\n\n"
+
+                "Return EXACTLY this JSON with these keys:\n"
+                "{\n"
+                "  'player': 'Full character or athlete name as printed on card',\n"
+                "  'year': 'Four-digit year',\n"
+                "  'brand': 'Pokemon / One Piece / Topps / Bowman / Panini / Upper Deck / etc',\n"
+                "  'set': 'Full set name if printed on card, else empty string',\n"
+                "  'set_code': 'Exact code read from card (e.g. PFL, OP07, SSH) — empty if unreadable',\n"
+                "  'variation': 'Exact variant type from Step 5 — empty string only if confirmed base non-holo',\n"
+                "  'serial': 'Denominator only from numbered card (e.g. 75 from 54/75) — empty if not numbered',\n"
+                "  'card_number': 'Exact number as printed (e.g. 025/091, OP07-112, SWSH001) — empty if unreadable',\n"
+                "  'sport': 'EXACTLY one of: Baseball / Football / Basketball / Hockey / Pokemon / One Piece / Magic / YuGiOh / Other',\n"
+                "  'graded': 'true or false',\n"
+                "  'grading_company': 'PSA / BGS / SGC / CGC / empty string',\n"
+                "  'grade': 'Numeric grade e.g. 10 or 9.5 — empty if not graded'\n"
+                "}\n\n"
+                "IMPORTANT RULES:\n"
+                "- Never guess or hallucinate a card number or set code. Empty string is better than wrong.\n"
+                "- Read card_number and set_code character by character from the actual image.\n"
+                "- All values must be single-line strings with no newlines."
             ),
         }
     ]
 
     for url in image_urls:
-        content.append({"type": "image_url", "image_url": {"url": url}})
+        content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
 
     payload = {
         "model": "gpt-4o",
-        "max_tokens": 600,
+        "max_tokens": 800,
         "messages": [{"role": "user", "content": content}],
     }
 
@@ -272,6 +299,7 @@ async def identify_card(image_urls: list) -> dict:
         if isinstance(card[key], str):
             card[key] = card[key].replace("\n", " ").replace("\r", " ").strip()
 
+    # Resolve set name from set code lookup table
     set_code = card.get("set_code", "")
     sport = card.get("sport", "")
     if set_code:
@@ -280,7 +308,109 @@ async def identify_card(image_urls: list) -> dict:
             print(f"Resolved set code '{set_code}' -> '{resolved}'")
             card["set"] = resolved
 
+    # For Pokemon cards, attempt a hard confirmation via the Pokemon TCG API
+    if "pokemon" in sport.lower() and (set_code or card.get("card_number")):
+        confirmed = await confirm_pokemon_card(set_code, card.get("card_number", ""), card.get("player", ""))
+        if confirmed:
+            print(f"Pokemon TCG API confirmed: {confirmed}")
+            # Overwrite GPT-4o guesses with canonical API data
+            card["player"]      = confirmed.get("name", card["player"])
+            card["set"]         = confirmed.get("set", card["set"])
+            card["set_code"]    = confirmed.get("set_code", card["set_code"])
+            card["card_number"] = confirmed.get("number", card["card_number"])
+            card["variation"]   = confirmed.get("rarity", card["variation"])
+            card["year"]        = confirmed.get("year", card["year"])
+            card["_ptcg_id"]    = confirmed.get("id", "")  # store for later use
+
     return card
+
+
+async def confirm_pokemon_card(set_code: str, card_number: str, player_name: str) -> dict | None:
+    """
+    Look up a Pokemon card in the Pokemon TCG API using set code + card number.
+    Falls back to name search if the number lookup fails.
+    Returns canonical card data to overwrite GPT-4o output.
+    """
+    base_url = "https://api.pokemontcg.io/v2/cards"
+    headers = {}  # No API key needed for free tier, but add if you have one
+    # If you have a Pokemon TCG API key, add it:
+    # POKEMON_TCG_API_KEY = os.environ.get("POKEMON_TCG_API_KEY", "")
+    # if POKEMON_TCG_API_KEY:
+    #     headers["X-Api-Key"] = POKEMON_TCG_API_KEY
+
+    try:
+        # Strategy 1: set code + card number — most precise
+        if set_code and card_number:
+            # Normalize card number: strip leading zeros from X/Y format for query
+            # Pokemon TCG API uses format like "set_id-number" e.g. "pfl-25"
+            # But we can also query by number field directly
+            clean_num = card_number.split("/")[0].lstrip("0") or "0"
+            # Try direct ID lookup: {set_id}-{number} e.g. pfl-25
+            ptcg_set_id = set_code.lower()
+            card_id = f"{ptcg_set_id}-{clean_num}"
+            print(f"Pokemon TCG API: trying ID lookup '{card_id}'")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base_url}/{card_id}",
+                    headers=headers,
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return _parse_ptcg_card(data.get("data", {}))
+
+            # Strategy 2: query by set + number fields
+            query = f'set.ptcgoCode:"{set_code}" number:"{card_number.split("/")[0]}"'
+            print(f"Pokemon TCG API: trying query '{query}'")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    base_url,
+                    headers=headers,
+                    params={"q": query, "pageSize": 5},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = data.get("data", [])
+                        if results:
+                            return _parse_ptcg_card(results[0])
+
+        # Strategy 3: name + set code fallback
+        if player_name and set_code:
+            query = f'name:"{player_name}" set.ptcgoCode:"{set_code}"'
+            print(f"Pokemon TCG API: fallback query '{query}'")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    base_url,
+                    headers=headers,
+                    params={"q": query, "pageSize": 5},
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = data.get("data", [])
+                        if results:
+                            return _parse_ptcg_card(results[0])
+
+        print("Pokemon TCG API: no match found")
+        return None
+
+    except Exception as e:
+        print(f"Pokemon TCG API error: {e}")
+        return None
+
+
+def _parse_ptcg_card(card: dict) -> dict | None:
+    """Extract the fields we care about from a Pokemon TCG API card object."""
+    if not card:
+        return None
+    return {
+        "id":       card.get("id", ""),
+        "name":     card.get("name", ""),
+        "number":   card.get("number", ""),
+        "set":      card.get("set", {}).get("name", ""),
+        "set_code": card.get("set", {}).get("ptcgoCode", ""),
+        "rarity":   card.get("rarity", ""),
+        "year":     str(card.get("set", {}).get("releaseDate", "")[:4]),
+    }
 
 
 def is_tcg_card(card: dict) -> bool:
@@ -445,11 +575,10 @@ def format_tcg_response(card: dict, query: str, tcg_data: dict | None, ebay_link
         timestamp=datetime.utcnow(),
     )
 
-    embed.add_field(
-        name="🔍 Search Used",
-        value=f"`{query}`" + (" *(manual)*" if manual else ""),
-        inline=False
-    )
+    search_label = f"`{query}`" + (" *(manual)*" if manual else "")
+    if card.get("_ptcg_id"):
+        search_label += "\n✅ *Confirmed via Pokemon TCG API*"
+    embed.add_field(name="🔍 Search Used", value=search_label, inline=False)
 
     if not manual and card:
         details = []
